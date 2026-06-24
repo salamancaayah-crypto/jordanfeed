@@ -187,6 +187,16 @@ def send_instagram_dm(recipient_igsid, text_message):
 # ----------------- FastAPI Webhook Server -----------------
 app = FastAPI(title="Instagram Telegram Webhook Linker")
 
+@app.on_event("startup")
+def startup_event():
+    if not TELEGRAM_TOKEN:
+        logger.error("TELEGRAM_TOKEN is missing! Cannot start Telegram polling.")
+        return
+    # Start Telegram Polling in background thread
+    tg_thread = threading.Thread(target=run_telegram_polling, daemon=True)
+    tg_thread.start()
+
+
 @app.get("/webhook", response_class=PlainTextResponse)
 def verify_webhook(
     hub_mode: str = Query(None, alias="hub.mode"),
@@ -336,10 +346,6 @@ if __name__ == "__main__":
         logger.critical("TELEGRAM_TOKEN is missing! Please configure it in .env file.")
         exit(1)
         
-    # Start Telegram Polling in background thread
-    tg_thread = threading.Thread(target=run_telegram_polling, daemon=True)
-    tg_thread.start()
-    
-    # Start FastAPI server in main thread
+    # Start FastAPI server in main thread (startup event will trigger Telegram polling)
     logger.info(f"Starting FastAPI Webhook Server on {HOST}:{PORT}...")
     uvicorn.run(app, host=HOST, port=PORT)
