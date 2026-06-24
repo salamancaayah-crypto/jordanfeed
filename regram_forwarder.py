@@ -38,7 +38,16 @@ load_env()
 # Config parameters
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 META_VERIFY_TOKEN = os.environ.get("META_VERIFY_TOKEN", "my_secret_verify_token")
-META_ACCESS_TOKEN = os.environ.get("META_ACCESS_TOKEN", "")
+
+try:
+    import config_token
+    META_ACCESS_TOKEN = getattr(config_token, "META_ACCESS_TOKEN", "")
+except ImportError:
+    META_ACCESS_TOKEN = ""
+
+if not META_ACCESS_TOKEN:
+    META_ACCESS_TOKEN = os.environ.get("META_ACCESS_TOKEN", "")
+
 PORT = int(os.environ.get("PORT", 8000))
 HOST = os.environ.get("HOST", "0.0.0.0")
 
