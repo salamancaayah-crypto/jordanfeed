@@ -1,0 +1,16 @@
+.env
+page_token.txt
+*.db
+*.sqlite
+*.log
+__pycache__/
+scratch/
+.wrangler/
+*.zip
+*.pdf
+*.bat
+*.sh
+*.html
+*.png
+*.jpg
+*.txt
