@@ -65,9 +65,14 @@ def init_db():
             linked_at INTEGER
         )
     """)
+    # Pre-insert user's mapping so it survives container restarts
+    cursor.execute("""
+        INSERT OR REPLACE INTO mappings (telegram_chat_id, instagram_igsid, link_token, linked_at)
+        VALUES ('338725979', '814728531594388', 'REG-TJVE', 1)
+    """)
     conn.commit()
     conn.close()
-    logger.info("Database initialized successfully.")
+    logger.info("Database initialized successfully with default mapping.")
 
 init_db()
 
