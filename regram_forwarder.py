@@ -210,6 +210,16 @@ def verify_webhook(
     logger.warning("Webhook verification challenge FAILED. Verify Token mismatch.")
     raise HTTPException(status_code=403, detail="Verification token mismatch")
 
+@app.get("/diagnostic/logs", response_class=PlainTextResponse)
+def get_diagnostic_logs():
+    log_file = "forwarder.log"
+    if os.path.exists(log_file):
+        with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+        return "".join(lines[-150:])
+    return "Log file not found."
+
+
 def download_and_forward_media(url: str, media_type: str, telegram_chat_id: str):
     """Downloads media from CDN and forwards to Telegram."""
     temp_filename = f"temp_media_{random.randint(1000, 9999)}"
