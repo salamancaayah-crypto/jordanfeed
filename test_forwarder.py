@@ -145,5 +145,65 @@ class TestRegramForwarder(unittest.TestCase):
         self.assertEqual(extract_shortcode("https://www.instagram.com/tv/DZ71pJVsCSt/"), "DZ71pJVsCSt")
         self.assertEqual(extract_shortcode("https://www.instagram.com/share/r/DZ71pJVsCSt/"), "DZ71pJVsCSt")
 
+    def test_webhook_media_forwarding_without_username(self):
+        # Link a user first
+        chat_id = "987654"
+        token, _ = create_or_get_token(chat_id)
+        link_instagram_account(token, "ig_user_caption_test")
+        
+        # Mock download_and_forward_media
+        original_download = regram_forwarder.download_and_forward_media
+        download_args = []
+        
+        def mock_download_and_forward_media(*args, **kwargs):
+            download_args.append((args, kwargs))
+            
+        regram_forwarder.download_and_forward_media = mock_download_and_forward_media
+        
+        # Webhook payload representing a shared post
+        payload = {
+            "object": "instagram",
+            "entry": [
+                {
+                    "id": "page_id_123",
+                    "time": 1234567,
+                    "messaging": [
+                        {
+                            "sender": {"id": "ig_user_caption_test"},
+                            "recipient": {"id": "page_id_123"},
+                            "message": {
+                                "mid": "mid.2222",
+                                "attachments": [
+                                    {
+                                        "type": "video",
+                                        "payload": {
+                                            "url": "https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=123",
+                                            "title": "This is a great caption!"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+        
+        response = self.client.post("/webhook", json=payload)
+        self.assertEqual(response.status_code, 200)
+        
+        # Restore mock
+        regram_forwarder.download_and_forward_media = original_download
+        
+        # Check that download was invoked correctly
+        self.assertEqual(len(download_args), 1)
+        args, kwargs = download_args[0]
+        self.assertEqual(args[0], "https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=123")
+        self.assertEqual(args[1], "video")
+        self.assertEqual(args[2], chat_id)
+        
+        caption = kwargs.get("original_caption") if "original_caption" in kwargs else args[5]
+        self.assertEqual(caption, "This is a great caption!")
+
 if __name__ == "__main__":
     unittest.main()
