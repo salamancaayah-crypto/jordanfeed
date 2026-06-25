@@ -6,6 +6,7 @@ import threading
 import logging
 import requests
 import uvicorn
+import time
 from fastapi import FastAPI, Request, Query, HTTPException, BackgroundTasks
 from fastapi.responses import PlainTextResponse
 import telebot
@@ -220,31 +221,49 @@ def get_diagnostic_logs():
     return "Log file not found."
 
 
-def download_and_forward_media(url: str, media_type: str, telegram_chat_id: str):
+def download_and_forward_media(url: str, media_type: str, telegram_chat_id: str, index: int = None, total: int = None):
     """Downloads media from CDN and forwards to Telegram."""
     temp_filename = f"temp_media_{random.randint(1000, 9999)}"
     
     try:
         logger.info(f"Downloading media from Meta CDN: {url}")
-        response = requests.get(url, stream=True, timeout=30)
+        
+        # Lookaside CDN URLs require authorization header
+        headers = {}
+        if "lookaside.fbsbx.com" in url and META_ACCESS_TOKEN:
+            headers["Authorization"] = f"Bearer {META_ACCESS_TOKEN}"
+            logger.info("Applying Meta Page Access Token authorization header for secure download.")
+            
+        response = requests.get(url, headers=headers, stream=True, timeout=30)
         
         if response.status_code != 200:
             logger.error(f"Failed to download media from CDN. HTTP Status: {response.status_code}")
-            bot.send_message(telegram_chat_id, "❌ فشل تحميل الفيديو من خوادم إنستغرام.")
+            # Only send error message on Telegram if it's the first slide or a single media to avoid spam
+            if index is None or index == 1:
+                bot.send_message(telegram_chat_id, "❌ فشل تحميل الفيديو/المنشور من خوادم إنستغرام.")
             return
 
         # Determine extension based on headers or simple fallback
         content_type = response.headers.get("Content-Type", "")
-        if "video" in content_type:
+        media_type_upper = media_type.upper()
+        
+        if "video" in content_type or media_type_upper in ["VIDEO", "IG_REEL", "REEL"]:
             temp_filename += ".mp4"
             is_video = True
-        elif "image" in content_type:
+        elif "image" in content_type or media_type_upper in ["IMAGE", "IMAGE_SHARE"]:
             temp_filename += ".jpg"
             is_video = False
         else:
-            # Fallback to mp4
-            temp_filename += ".mp4"
-            is_video = True
+            # Fallback based on content type detect
+            if "video" in content_type:
+                temp_filename += ".mp4"
+                is_video = True
+            elif "image" in content_type:
+                temp_filename += ".jpg"
+                is_video = False
+            else:
+                temp_filename += ".mp4"
+                is_video = True
 
         with open(temp_filename, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
@@ -253,22 +272,85 @@ def download_and_forward_media(url: str, media_type: str, telegram_chat_id: str)
         
         logger.info(f"Media downloaded successfully. Sending to Telegram chat {telegram_chat_id}...")
         
+        caption_prefix = "🎞" if is_video else "🖼"
+        caption_type_str = "فيديو الريلز" if is_video else "المنشور"
+        if index is not None and total is not None:
+            caption = f"{caption_prefix} إليك {caption_type_str} المطلوب ({index}/{total}):"
+        else:
+            caption = f"{caption_prefix} إليك {caption_type_str} المطلوب:"
+            
         with open(temp_filename, "rb") as media_file:
             if is_video:
-                bot.send_video(telegram_chat_id, media_file, caption="🎞 إليك فيديو الريلز المطلب:")
+                bot.send_video(telegram_chat_id, media_file, caption=caption)
             else:
-                bot.send_photo(telegram_chat_id, media_file, caption="🖼 إليك المنشور المطلب:")
+                bot.send_photo(telegram_chat_id, media_file, caption=caption)
                 
         logger.info(f"Media forwarded successfully to Telegram.")
         
     except Exception as e:
         logger.error(f"Error during media download and forwarding: {e}")
-        bot.send_message(telegram_chat_id, f"❌ حدث خطأ أثناء معالجة وإرسال الفيديو: {e}")
+        if index is None or index == 1:
+            bot.send_message(telegram_chat_id, f"❌ حدث خطأ أثناء معالجة وإرسال الفيديو/المنشور: {e}")
     finally:
         # Clean up temp file
         if os.path.exists(temp_filename):
             os.remove(temp_filename)
             logger.info(f"Temporary file {temp_filename} deleted.")
+
+def get_carousel_media_urls(media_id: str, token: str):
+    """Queries Instagram Graph API to retrieve all media URLs for a carousel post."""
+    if not token or not media_id:
+        return []
+    
+    url = f"https://graph.facebook.com/v20.0/{media_id}"
+    params = {
+        "fields": "id,media_type,media_url,children{id,media_type,media_url}",
+        "access_token": token
+    }
+    try:
+        logger.info(f"Querying Graph API for media {media_id} details...")
+        res = requests.get(url, params=params, timeout=15)
+        if res.status_code == 200:
+            data = res.json()
+            media_type = data.get("media_type")
+            
+            if media_type == "CAROUSEL_ALBUM" and "children" in data:
+                children_data = data["children"].get("data", [])
+                urls = []
+                for child in children_data:
+                    child_url = child.get("media_url")
+                    child_type = child.get("media_type") # IMAGE or VIDEO
+                    if child_url:
+                        urls.append((child_url, child_type))
+                return urls
+            else:
+                # Single image or video
+                parent_url = data.get("media_url")
+                parent_type = data.get("media_type")
+                if parent_url:
+                    return [(parent_url, parent_type)]
+        else:
+            logger.error(f"Failed to query media details for {media_id}. HTTP Status: {res.status_code}, Response: {res.text}")
+    except Exception as e:
+        logger.error(f"Error querying media details for {media_id}: {e}")
+    return []
+
+def download_and_forward_carousel(urls_and_types, telegram_chat_id: str):
+    """Downloads all media items of a carousel sequentially with a rate-limit sleep."""
+    total = len(urls_and_types)
+    logger.info(f"Starting sequential carousel download & forward for {total} items...")
+    
+    for idx, (url, m_type) in enumerate(urls_and_types):
+        try:
+            # Download and forward this item
+            download_and_forward_media(url, m_type, telegram_chat_id, idx + 1, total)
+        except Exception as e:
+            logger.error(f"Failed to forward carousel item {idx+1}/{total}: {e}")
+        
+        # Sleep 0.5 seconds between slides to rate limit Telegram API calls
+        if idx < total - 1:
+            logger.info("Sleeping 0.5s before next carousel item to rate-limit Telegram API...")
+            time.sleep(0.5)
 
 @app.post("/webhook")
 async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
@@ -326,13 +408,37 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
                         telegram_chat_id = get_telegram_chat_id(sender_igsid)
                         
                         if telegram_chat_id:
-                            logger.info(f"Forwarding shared media of type {att_type} from IGSID {sender_igsid} to Telegram Chat {telegram_chat_id}")
-                            background_tasks.add_task(
-                                download_and_forward_media,
-                                media_url,
-                                att_type,
-                                telegram_chat_id
-                            )
+                            # Try to get post media ID for children (carousel) support
+                            media_id = payload.get("ig_post_media_id") or payload.get("id") or payload.get("reel_video_id") or payload.get("video_id")
+                            carousel_urls = []
+                            
+                            if media_id and META_ACCESS_TOKEN:
+                                try:
+                                    carousel_urls = get_carousel_media_urls(media_id, META_ACCESS_TOKEN)
+                                except Exception as e:
+                                    logger.error(f"Error checking carousel for media_id {media_id}: {e}")
+                            
+                            if carousel_urls and len(carousel_urls) > 1:
+                                logger.info(f"Forwarding shared carousel with {len(carousel_urls)} items from IGSID {sender_igsid} to Telegram Chat {telegram_chat_id}")
+                                background_tasks.add_task(
+                                    download_and_forward_carousel,
+                                    carousel_urls,
+                                    telegram_chat_id
+                                )
+                            else:
+                                # If there's only one item in carousel or it's a single post, use the single URL from Graph API detail if available
+                                if carousel_urls:
+                                    url_to_use, type_to_use = carousel_urls[0]
+                                else:
+                                    url_to_use, type_to_use = media_url, att_type
+                                    
+                                logger.info(f"Forwarding single shared media of type {type_to_use} from IGSID {sender_igsid} to Telegram Chat {telegram_chat_id}")
+                                background_tasks.add_task(
+                                    download_and_forward_media,
+                                    url_to_use,
+                                    type_to_use,
+                                    telegram_chat_id
+                                )
                         else:
                             logger.warning(f"Received media from unlinked IGSID {sender_igsid}")
                             send_instagram_dm(
