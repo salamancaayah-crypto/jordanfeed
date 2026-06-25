@@ -7,9 +7,14 @@ import logging
 import requests
 import uvicorn
 import time
+import re
+import instaloader
 from fastapi import FastAPI, Request, Query, HTTPException, BackgroundTasks
 from fastapi.responses import PlainTextResponse
 import telebot
+
+# Initialize Instaloader globally without login (fully anonymous)
+L = instaloader.Instaloader()
 
 # Configure logging
 logging.basicConfig(
@@ -352,6 +357,48 @@ def download_and_forward_carousel(urls_and_types, telegram_chat_id: str):
             logger.info("Sleeping 0.5s before next carousel item to rate-limit Telegram API...")
             time.sleep(0.5)
 
+def extract_shortcode(url: str) -> str:
+    """Extracts the Instagram shortcode from a Reel or Post URL."""
+    match = re.search(r'/(?:p|reel|tv|share/[rp]|reels)/(A-Za-z0-9_-]+)', url)
+    if match:
+        return match.group(1)
+    
+    parts = [p for p in url.split('/') if p]
+    if parts:
+        last = parts[-1].split('?')[0]
+        if len(last) > 3:
+            return last
+    return ""
+
+def resolve_instagram_url(url: str):
+    """Resolves a public Instagram post/reel URL to its direct CDN media URLs and types using Instaloader."""
+    shortcode = extract_shortcode(url)
+    if not shortcode:
+        logger.warning(f"Could not extract shortcode from URL: {url}")
+        return []
+    
+    try:
+        logger.info(f"Resolving shortcode {shortcode} via Instaloader...")
+        post = instaloader.Post.from_shortcode(L.context, shortcode)
+        
+        if post.typename == 'GraphSidecar':
+            urls = []
+            for node in post.get_sidecar_nodes():
+                if node.is_video:
+                    urls.append((node.video_url, "VIDEO"))
+                else:
+                    urls.append((node.display_url, "IMAGE"))
+            return urls
+        
+        if post.is_video:
+            return [(post.video_url, "VIDEO")]
+        
+        return [(post.display_url, "IMAGE")]
+        
+    except Exception as e:
+        logger.error(f"Instaloader failed to resolve shortcode {shortcode}: {e}")
+    return []
+
 @app.post("/webhook")
 async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
     """Processes incoming Instagram Messaging events from Meta."""
@@ -396,56 +443,78 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
                     # Fail reply on Instagram
                     send_instagram_dm(sender_igsid, "❌ الكود غير صحيح أو انتهت صلاحيته. يرجى التأكد من كتابته بشكل صحيح من بوت تيليجرام.")
                     
-            # Case 2: Media Shared (Reels, Posts, Stories)
-            elif attachments:
-                for attachment in attachments:
-                    att_type = attachment.get("type")
-                    payload = attachment.get("payload", {})
-                    media_url = payload.get("url")
+            else:
+                # Extract media details if shared or pasted as text link
+                media_url = ""
+                att_type = ""
+                media_id = ""
+                
+                # Check if it is a shared attachment
+                if attachments:
+                    for attachment in attachments:
+                        att_type = attachment.get("type")
+                        payload = attachment.get("payload", {})
+                        media_url = payload.get("url")
+                        media_id = payload.get("ig_post_media_id") or payload.get("id") or payload.get("reel_video_id") or payload.get("video_id")
+                        break # Process the first media attachment
+                
+                # Check if it is a copy-pasted link in text message
+                elif "instagram.com" in message_text:
+                    url_match = re.search(r'(https?://[^\s]*instagram\.com/[^\s]*)', message_text)
+                    if url_match:
+                        media_url = url_match.group(1)
+                        att_type = "link"
+                
+                if media_url:
+                    # Check if sender is mapped to a Telegram Chat ID
+                    telegram_chat_id = get_telegram_chat_id(sender_igsid)
                     
-                    if media_url:
-                        # Check if sender is mapped to a Telegram Chat ID
-                        telegram_chat_id = get_telegram_chat_id(sender_igsid)
+                    if telegram_chat_id:
+                        carousel_urls = []
                         
-                        if telegram_chat_id:
-                            # Try to get post media ID for children (carousel) support
-                            media_id = payload.get("ig_post_media_id") or payload.get("id") or payload.get("reel_video_id") or payload.get("video_id")
-                            carousel_urls = []
-                            
-                            if media_id and META_ACCESS_TOKEN:
-                                try:
-                                    carousel_urls = get_carousel_media_urls(media_id, META_ACCESS_TOKEN)
-                                except Exception as e:
-                                    logger.error(f"Error checking carousel for media_id {media_id}: {e}")
-                            
-                            if carousel_urls and len(carousel_urls) > 1:
-                                logger.info(f"Forwarding shared carousel with {len(carousel_urls)} items from IGSID {sender_igsid} to Telegram Chat {telegram_chat_id}")
-                                background_tasks.add_task(
-                                    download_and_forward_carousel,
-                                    carousel_urls,
-                                    telegram_chat_id
-                                )
-                            else:
-                                # If there's only one item in carousel or it's a single post, use the single URL from Graph API detail if available
-                                if carousel_urls:
-                                    url_to_use, type_to_use = carousel_urls[0]
-                                else:
-                                    url_to_use, type_to_use = media_url, att_type
-                                    
-                                logger.info(f"Forwarding single shared media of type {type_to_use} from IGSID {sender_igsid} to Telegram Chat {telegram_chat_id}")
-                                background_tasks.add_task(
-                                    download_and_forward_media,
-                                    url_to_use,
-                                    type_to_use,
-                                    telegram_chat_id
-                                )
-                        else:
-                            logger.warning(f"Received media from unlinked IGSID {sender_igsid}")
-                            send_instagram_dm(
-                                sender_igsid,
-                                "⚠️ حسابك غير مرتبط ببوت تيليجرام بعد.\n\n"
-                                "يرجى فتح بوت تيليجرام والحصول على كود الربط، ثم إرساله هنا لتتمكن من استخدام الخدمة."
+                        # 1. Try to resolve the URL using Instaloader if it is a public instagram.com URL
+                        if "instagram.com" in media_url:
+                            try:
+                                carousel_urls = resolve_instagram_url(media_url)
+                            except Exception as e:
+                                logger.error(f"Error resolving instagram.com URL via Instaloader: {e}")
+                        
+                        # 2. Fallback to Facebook Graph API for Lookaside URLs if we have a media ID
+                        if not carousel_urls and media_id and META_ACCESS_TOKEN:
+                            try:
+                                carousel_urls = get_carousel_media_urls(media_id, META_ACCESS_TOKEN)
+                            except Exception as e:
+                                logger.error(f"Error checking carousel for media_id {media_id} via Graph API: {e}")
+                        
+                        # Forward media to Telegram
+                        if carousel_urls and len(carousel_urls) > 1:
+                            logger.info(f"Forwarding shared carousel with {len(carousel_urls)} items from IGSID {sender_igsid} to Telegram Chat {telegram_chat_id}")
+                            background_tasks.add_task(
+                                download_and_forward_carousel,
+                                carousel_urls,
+                                telegram_chat_id
                             )
+                        else:
+                            # Single media fallback
+                            if carousel_urls:
+                                url_to_use, type_to_use = carousel_urls[0]
+                            else:
+                                url_to_use, type_to_use = media_url, att_type
+                                
+                            logger.info(f"Forwarding single shared media of type {type_to_use} from IGSID {sender_igsid} to Telegram Chat {telegram_chat_id}")
+                            background_tasks.add_task(
+                                download_and_forward_media,
+                                url_to_use,
+                                type_to_use,
+                                telegram_chat_id
+                            )
+                    else:
+                        logger.warning(f"Received media from unlinked IGSID {sender_igsid}")
+                        send_instagram_dm(
+                            sender_igsid,
+                            "⚠️ حسابك غير مرتبط ببوت تيليجرام بعد.\n\n"
+                            "يرجى فتح بوت تيليجرام والحصول على كود الربط، ثم إرساله هنا لتتمكن من استخدام الخدمة."
+                        )
 
     return {"status": "success"}
 
