@@ -297,17 +297,19 @@ def download_and_forward_media(
         
         logger.info(f"Media downloaded successfully. Sending to Telegram chat {telegram_chat_id}...")
         
-        caption_prefix = "🎞" if is_video else "🖼"
-        caption_type_str = "فيديو الريلز" if is_video else "المنشور"
+        caption = ""
         if index is not None and total is not None:
-            base_caption = f"{caption_prefix} إليك {caption_type_str} المطلوب ({index}/{total}):"
-        else:
-            base_caption = f"{caption_prefix} إليك {caption_type_str} المطلوب:"
+            caption = f"({index}/{total})"
             
         if original_caption:
-            caption = f"{base_caption}\n\n{original_caption.strip()}"
-        else:
-            caption = base_caption
+            original_caption_clean = original_caption.strip()
+            if caption:
+                caption = f"{caption} {original_caption_clean}"
+            else:
+                caption = original_caption_clean
+                
+        if not caption:
+            caption = None
             
         with open(temp_filename, "rb") as media_file:
             if is_video:
