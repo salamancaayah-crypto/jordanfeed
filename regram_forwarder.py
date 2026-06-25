@@ -67,6 +67,13 @@ def init_db():
             linked_at INTEGER
         )
     """)
+    # Migration: add instagram_username column if not present
+    try:
+        cursor.execute("ALTER TABLE mappings ADD COLUMN instagram_username TEXT")
+        logger.info("Database migration: Added instagram_username column.")
+    except sqlite3.OperationalError:
+        pass
+        
     # Pre-insert user's mapping so it survives container restarts
     cursor.execute("""
         INSERT OR REPLACE INTO mappings (telegram_chat_id, instagram_igsid, link_token, linked_at)
@@ -122,10 +129,62 @@ def link_instagram_account(token, igsid):
         conn.commit()
         conn.close()
         logger.info(f"Successfully linked IG {igsid} to Telegram Chat ID {chat_id}")
+        
+        # Proactively fetch and cache username in background thread
+        threading.Thread(target=get_instagram_username, args=(igsid,), daemon=True).start()
+        
         return chat_id
         
     conn.close()
     return None
+
+def get_instagram_username(igsid):
+    """Gets the Instagram username from DB cache or queries Graph API if not cached."""
+    if not igsid:
+        return ""
+        
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Check cache first
+    try:
+        cursor.execute("SELECT instagram_username FROM mappings WHERE instagram_igsid = ?", (str(igsid),))
+        row = cursor.fetchone()
+        if row and row[0]:
+            conn.close()
+            return row[0]
+    except Exception as e:
+        logger.error(f"Error checking username cache: {e}")
+        
+    # Fetch from Graph API if not cached
+    username = ""
+    if META_ACCESS_TOKEN:
+        if META_ACCESS_TOKEN.startswith("IGAA"):
+            url = f"https://graph.instagram.com/v20.0/{igsid}"
+        else:
+            url = f"https://graph.facebook.com/v20.0/{igsid}"
+            
+        params = {
+            "fields": "username",
+            "access_token": META_ACCESS_TOKEN
+        }
+        try:
+            logger.info(f"Querying Instagram username for IGSID {igsid}...")
+            res = requests.get(url, params=params, timeout=10)
+            if res.status_code == 200:
+                username = res.json().get("username", "")
+                if username:
+                    # Update database cache
+                    cursor.execute("UPDATE mappings SET instagram_username = ? WHERE instagram_igsid = ?", (username, str(igsid)))
+                    conn.commit()
+                    logger.info(f"Cached username '{username}' for IGSID {igsid}")
+            else:
+                logger.error(f"Failed to query username from Graph API: {res.text}")
+        except Exception as e:
+            logger.error(f"Error querying username from Graph API: {e}")
+            
+    conn.close()
+    return username
 
 def get_telegram_chat_id(igsid):
     conn = sqlite3.connect(DB_PATH)
@@ -222,7 +281,15 @@ def get_diagnostic_logs():
     return "Log file not found."
 
 
-def download_and_forward_media(url: str, media_type: str, telegram_chat_id: str, index: int = None, total: int = None):
+def download_and_forward_media(
+    url: str, 
+    media_type: str, 
+    telegram_chat_id: str, 
+    index: int = None, 
+    total: int = None,
+    original_caption: str = "",
+    instagram_username: str = ""
+):
     """Downloads media from CDN and forwards to Telegram."""
     temp_filename = f"temp_media_{random.randint(1000, 9999)}"
     
@@ -284,9 +351,20 @@ def download_and_forward_media(url: str, media_type: str, telegram_chat_id: str,
         caption_prefix = "🎞" if is_video else "🖼"
         caption_type_str = "فيديو الريلز" if is_video else "المنشور"
         if index is not None and total is not None:
-            caption = f"{caption_prefix} إليك {caption_type_str} المطلوب ({index}/{total}):"
+            base_caption = f"{caption_prefix} إليك {caption_type_str} المطلوب ({index}/{total}):"
         else:
-            caption = f"{caption_prefix} إليك {caption_type_str} المطلوب:"
+            base_caption = f"{caption_prefix} إليك {caption_type_str} المطلوب:"
+            
+        extra_parts = []
+        if original_caption:
+            extra_parts.append(original_caption.strip())
+        if instagram_username:
+            extra_parts.append(f"#{instagram_username}")
+            
+        if extra_parts:
+            caption = f"{base_caption}\n\n" + "\n\n".join(extra_parts)
+        else:
+            caption = base_caption
             
         with open(temp_filename, "rb") as media_file:
             if is_video:
@@ -344,7 +422,12 @@ def get_carousel_media_urls(media_id: str, token: str):
         logger.error(f"Error querying media details for {media_id}: {e}")
     return []
 
-def download_and_forward_carousel(urls_and_types, telegram_chat_id: str):
+def download_and_forward_carousel(
+    urls_and_types, 
+    telegram_chat_id: str,
+    original_caption: str = "",
+    instagram_username: str = ""
+):
     """Downloads all media items of a carousel sequentially with a rate-limit sleep."""
     total = len(urls_and_types)
     logger.info(f"Starting sequential carousel download & forward for {total} items...")
@@ -352,7 +435,15 @@ def download_and_forward_carousel(urls_and_types, telegram_chat_id: str):
     for idx, (url, m_type) in enumerate(urls_and_types):
         try:
             # Download and forward this item
-            download_and_forward_media(url, m_type, telegram_chat_id, idx + 1, total)
+            download_and_forward_media(
+                url, 
+                m_type, 
+                telegram_chat_id, 
+                idx + 1, 
+                total,
+                original_caption,
+                instagram_username
+            )
         except Exception as e:
             logger.error(f"Failed to forward carousel item {idx+1}/{total}: {e}")
         
@@ -495,6 +586,7 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
                 media_url = ""
                 att_type = ""
                 media_id = ""
+                original_caption = ""
                 
                 # Check if it is a shared attachment
                 if attachments:
@@ -503,6 +595,7 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
                         payload = attachment.get("payload", {})
                         media_url = payload.get("url")
                         media_id = payload.get("ig_post_media_id") or payload.get("id") or payload.get("reel_video_id") or payload.get("video_id")
+                        original_caption = payload.get("title", "")
                         break # Process the first media attachment
                 
                 # Check if it is a copy-pasted link in text message
@@ -517,6 +610,9 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
                     telegram_chat_id = get_telegram_chat_id(sender_igsid)
                     
                     if telegram_chat_id:
+                        # Fetch Instagram Username of the sender
+                        instagram_username = get_instagram_username(sender_igsid)
+                        
                         carousel_urls = []
                         
                         # 1. Try to resolve the URL using the proxy if it is a public instagram.com URL
@@ -542,7 +638,9 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
                             background_tasks.add_task(
                                 download_and_forward_carousel,
                                 carousel_urls,
-                                telegram_chat_id
+                                telegram_chat_id,
+                                original_caption,
+                                instagram_username
                             )
                         else:
                             # Single media fallback
@@ -556,7 +654,11 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
                                 download_and_forward_media,
                                 url_to_use,
                                 type_to_use,
-                                telegram_chat_id
+                                telegram_chat_id,
+                                None,
+                                None,
+                                original_caption,
+                                instagram_username
                             )
                     else:
                         logger.warning(f"Received media from unlinked IGSID {sender_igsid}")

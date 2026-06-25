@@ -26,7 +26,10 @@ class TestRegramForwarder(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         os.close(cls.db_fd)
-        os.unlink(cls.temp_db_path)
+        try:
+            os.unlink(cls.temp_db_path)
+        except PermissionError:
+            pass
 
     def setUp(self):
         # Clear DB before each test
