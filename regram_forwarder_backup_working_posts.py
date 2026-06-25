@@ -244,14 +244,6 @@ def download_and_forward_media(url: str, media_type: str, telegram_chat_id: str,
                 bot.send_message(telegram_chat_id, "❌ فشل تحميل الفيديو/المنشور من خوادم إنستغرام.")
             return
 
-        # Check if we accidentally downloaded an HTML page (e.g. if the proxy failed or link was private)
-        content_type = response.headers.get("Content-Type", "")
-        if "text/html" in content_type:
-            logger.error(f"Failed to download media: server returned HTML page instead of media stream. Content-Type: {content_type}")
-            if index is None or index == 1:
-                bot.send_message(telegram_chat_id, "❌ لا يمكن تحميل هذا المنشور/الريلز. قد يكون الحساب خاصاً (Private) أو الرابط غير صالح.")
-            return
-
         # Determine extension based on headers or simple fallback
         content_type = response.headers.get("Content-Type", "")
         media_type_upper = media_type.upper()
@@ -363,22 +355,19 @@ def download_and_forward_carousel(urls_and_types, telegram_chat_id: str):
 
 def extract_shortcode(url: str) -> str:
     """Extracts the Instagram shortcode from a Reel or Post URL."""
-    # First try the corrected regex
-    match = re.search(r'/(?:p|reel|tv|share/[rp]|reels)/([A-Za-z0-9_-]+)', url)
+    match = re.search(r'/(?:p|reel|tv|share/[rp]|reels)/(A-Za-z0-9_-]+)', url)
     if match:
         return match.group(1)
     
-    # Fallback: clean up trailing parameters, trailing slashes, and look for last non-empty part
-    clean_url = url.split('?')[0]
-    parts = [p for p in clean_url.split('/') if p]
+    parts = [p for p in url.split('/') if p]
     if parts:
-        last = parts[-1]
+        last = parts[-1].split('?')[0]
         if len(last) > 3:
             return last
     return ""
 
-def resolve_via_proxy(url: str, domain: str = "vxinstagram.com"):
-    """Resolves any public Instagram Reel or Post URL to its direct CDN media URLs and types using a proxy domain."""
+def resolve_via_vxinstagram(url: str):
+    """Resolves any public Instagram Reel or Post URL to its direct CDN media URLs and types using vxinstagram proxy."""
     shortcode = extract_shortcode(url)
     if not shortcode:
         logger.warning(f"Could not extract shortcode from URL: {url}")
@@ -394,13 +383,13 @@ def resolve_via_proxy(url: str, domain: str = "vxinstagram.com"):
     # Try index 1 to 10 for potential carousel
     for index in range(1, 11):
         post_type = "reel" if "reel" in url else "p"
-        proxy_url = f"https://{domain}/{post_type}/{shortcode}/{index}/"
+        proxy_url = f"https://www.vxinstagram.com/{post_type}/{shortcode}/{index}/"
         
         try:
-            logger.info(f"Querying {domain} for shortcode {shortcode} at index {index}...")
+            logger.info(f"Querying vxinstagram for shortcode {shortcode} at index {index}...")
             res = requests.get(proxy_url, headers=headers, timeout=10)
             if res.status_code != 200:
-                logger.info(f"{domain} returned status code {res.status_code} for index {index}. Stopping.")
+                logger.info(f"vxinstagram returned status code {res.status_code} for index {index}. Stopping.")
                 break
                 
             text = res.text
@@ -417,7 +406,7 @@ def resolve_via_proxy(url: str, domain: str = "vxinstagram.com"):
                 media_type = "IMAGE"
                 
             if not media_url:
-                logger.info(f"No media meta tags found at index {index} on {domain}. Stopping.")
+                logger.info(f"No media meta tags found at index {index}. Stopping.")
                 break
                 
             # Follow redirects with a HEAD request to detect duplicate content
@@ -441,7 +430,7 @@ def resolve_via_proxy(url: str, domain: str = "vxinstagram.com"):
                 break
                 
         except Exception as e:
-            logger.error(f"Error resolving index {index} via {domain}: {e}")
+            logger.error(f"Error resolving index {index} via vxinstagram: {e}")
             break
             
     return urls
@@ -519,15 +508,12 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
                     if telegram_chat_id:
                         carousel_urls = []
                         
-                        # 1. Try to resolve the URL using the proxy if it is a public instagram.com URL
+                        # 1. Try to resolve the URL using vxinstagram if it is a public instagram.com URL
                         if "instagram.com" in media_url:
                             try:
-                                carousel_urls = resolve_via_proxy(media_url, "vxinstagram.com")
-                                if not carousel_urls:
-                                    logger.info("vxinstagram failed to resolve media. Trying fallback to ddinstagram...")
-                                    carousel_urls = resolve_via_proxy(media_url, "ddinstagram.com")
+                                carousel_urls = resolve_via_vxinstagram(media_url)
                             except Exception as e:
-                                logger.error(f"Error resolving instagram.com URL via proxy: {e}")
+                                logger.error(f"Error resolving instagram.com URL via vxinstagram: {e}")
                         
                         # 2. Fallback to Facebook Graph API for Lookaside URLs if we have a media ID
                         if not carousel_urls and media_id and META_ACCESS_TOKEN:
