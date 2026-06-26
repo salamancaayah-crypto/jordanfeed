@@ -366,6 +366,20 @@ class TestRegramForwarder(unittest.TestCase):
         finally:
             regram_forwarder.bot.send_message = original_send_message
             
+        # Test help command
+        help_message = MockMessage(338725979)
+        help_message.text = "/help"
+        original_send_message = regram_forwarder.bot.send_message
+        sent_messages = []
+        regram_forwarder.bot.send_message = lambda chat, text, **kw: sent_messages.append((chat, text))
+        try:
+            from regram_forwarder import handle_help
+            handle_help(help_message)
+            self.assertEqual(len(sent_messages), 1)
+            self.assertTrue("دليل استخدام" in sent_messages[0][1])
+        finally:
+            regram_forwarder.bot.send_message = original_send_message
+
         # Test unfollow
         unfollow_user_db(chat_id, "loor.med")
         self.assertEqual(get_follow_count(chat_id), 0)
