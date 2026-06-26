@@ -205,5 +205,50 @@ class TestRegramForwarder(unittest.TestCase):
         caption = kwargs.get("original_caption") if "original_caption" in kwargs else args[5]
         self.assertEqual(caption, "This is a great caption!")
 
+    def test_caption_formatting_with_hashtag(self):
+        # Mock bot.send_video
+        original_send_video = regram_forwarder.bot.send_video
+        sent_captions = []
+        
+        def mock_send_video(chat_id, media_file, caption=None, **kwargs):
+            sent_captions.append(caption)
+            
+        regram_forwarder.bot.send_video = mock_send_video
+        
+        # Mock requests.get
+        import requests
+        original_get = requests.get
+        
+        class MockResponse:
+            def __init__(self):
+                self.status_code = 200
+                self.headers = {"Content-Type": "video/mp4"}
+            def iter_content(self, chunk_size=8192):
+                return [b"dummy_data"]
+                
+        def mock_get(*args, **kwargs):
+            return MockResponse()
+            
+        requests.get = mock_get
+        
+        try:
+            # Run download_and_forward_media
+            regram_forwarder.download_and_forward_media(
+                "http://example.com/video.mp4",
+                "video",
+                "123456",
+                None,
+                None,
+                "Original Caption Here",
+                "",
+                "creator_name"
+            )
+            
+            self.assertEqual(len(sent_captions), 1)
+            self.assertEqual(sent_captions[0], "#creator_name\n\nOriginal Caption Here")
+        finally:
+            regram_forwarder.bot.send_video = original_send_video
+            requests.get = original_get
+
 if __name__ == "__main__":
     unittest.main()

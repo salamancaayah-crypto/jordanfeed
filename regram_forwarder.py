@@ -136,6 +136,41 @@ def link_instagram_account(token, igsid):
 
 
 
+def get_creator_username(shortcode: str) -> str:
+    """Queries toinstagram.com proxy to extract the original creator's Instagram username."""
+    if not shortcode:
+        return ""
+        
+    url = f"https://toinstagram.com/p/{shortcode}/"
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+    try:
+        logger.info(f"Querying toinstagram.com to resolve creator username for shortcode {shortcode}...")
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            html = res.text
+            # Look for: "likes, comments - username on Date"
+            match = re.search(r'comments\s*-\s*([A-Za-z0-9_.-]+)\s+on\s+', html)
+            if match:
+                username = match.group(1).strip()
+                logger.info(f"Resolved creator username '{username}' for shortcode {shortcode}")
+                return username
+            
+            # Alternative: "username on Instagram"
+            match = re.search(r'content="([A-Za-z0-9_.-]+)\s+on\s+Instagram', html)
+            if match:
+                username = match.group(1).strip()
+                logger.info(f"Resolved creator username '{username}' for shortcode {shortcode}")
+                return username
+                
+        else:
+            logger.warning(f"toinstagram.com returned status {res.status_code} for shortcode {shortcode}")
+    except Exception as e:
+        logger.error(f"Error resolving creator username for shortcode {shortcode} via toinstagram.com: {e}")
+        
+    return ""
+
 def get_telegram_chat_id(igsid):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -237,7 +272,9 @@ def download_and_forward_media(
     telegram_chat_id: str, 
     index: int = None, 
     total: int = None,
-    original_caption: str = ""
+    original_caption: str = "",
+    shortcode: str = "",
+    creator_username: str = ""
 ):
     """Downloads media from CDN and forwards to Telegram."""
     temp_filename = f"temp_media_{random.randint(1000, 9999)}"
@@ -297,14 +334,27 @@ def download_and_forward_media(
         
         logger.info(f"Media downloaded successfully. Sending to Telegram chat {telegram_chat_id}...")
         
+        # Resolve creator username if not passed but shortcode exists
+        if not creator_username and shortcode:
+            try:
+                creator_username = get_creator_username(shortcode)
+            except Exception as e:
+                logger.error(f"Error fetching creator username in background task: {e}")
+
         caption = ""
         if index is not None and total is not None:
             caption = f"({index}/{total})"
             
+        if creator_username:
+            if caption:
+                caption = f"{caption} #{creator_username}"
+            else:
+                caption = f"#{creator_username}"
+                
         if original_caption:
             original_caption_clean = original_caption.strip()
             if caption:
-                caption = f"{caption} {original_caption_clean}"
+                caption = f"{caption}\n\n{original_caption_clean}"
             else:
                 caption = original_caption_clean
                 
@@ -370,12 +420,21 @@ def get_carousel_media_urls(media_id: str, token: str):
 def download_and_forward_carousel(
     urls_and_types, 
     telegram_chat_id: str,
-    original_caption: str = ""
+    original_caption: str = "",
+    shortcode: str = ""
 ):
     """Downloads all media items of a carousel sequentially with a rate-limit sleep."""
     total = len(urls_and_types)
     logger.info(f"Starting sequential carousel download & forward for {total} items...")
     
+    # Resolve creator username once for the whole carousel
+    creator_username = ""
+    if shortcode:
+        try:
+            creator_username = get_creator_username(shortcode)
+        except Exception as e:
+            logger.error(f"Error fetching creator username for carousel: {e}")
+            
     for idx, (url, m_type) in enumerate(urls_and_types):
         try:
             # Download and forward this item
@@ -385,7 +444,9 @@ def download_and_forward_carousel(
                 telegram_chat_id, 
                 idx + 1, 
                 total,
-                original_caption
+                original_caption,
+                shortcode,
+                creator_username
             )
         except Exception as e:
             logger.error(f"Failed to forward carousel item {idx+1}/{total}: {e}")
@@ -553,6 +614,9 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
                     telegram_chat_id = get_telegram_chat_id(sender_igsid)
                     
                     if telegram_chat_id:
+                        # Extract shortcode to resolve creator username later
+                        shortcode = extract_shortcode(media_url)
+                        
                         carousel_urls = []
                         
                         # 1. Try to resolve the URL using the proxy if it is a public instagram.com URL
@@ -579,7 +643,8 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
                                 download_and_forward_carousel,
                                 carousel_urls,
                                 telegram_chat_id,
-                                original_caption
+                                original_caption,
+                                shortcode
                             )
                         else:
                             # Single media fallback
@@ -596,7 +661,8 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
                                 telegram_chat_id,
                                 None,
                                 None,
-                                original_caption
+                                original_caption,
+                                shortcode
                             )
                     else:
                         logger.warning(f"Received media from unlinked IGSID {sender_igsid}")
