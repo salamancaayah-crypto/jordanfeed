@@ -369,20 +369,39 @@ def handle_follow(message):
         
     chat_id = message.chat.id
     
-    # Check limit of 10 followed accounts
-    if get_follow_count(chat_id) >= 10:
-        bot.send_message(chat_id, "❌ لقد تجاوزت الحد الأقصى للمتابعة (10 حسابات). يرجى إلغاء متابعة حساب أولاً باستخدام /unfollow.")
-        return
-        
-    parts = message.text.split(maxsplit=1)
+    parts = message.text.split()
     if len(parts) < 2:
-        bot.send_message(chat_id, "💡 طريقة الاستخدام:\n`/follow username`", parse_mode="Markdown")
+        bot.send_message(chat_id, "💡 طريقة الاستخدام:\n`/follow username [channel_username_or_id]`", parse_mode="Markdown")
         return
         
     username = parts[1].strip()
     # Basic validation
     if not re.match(r'^[A-Za-z0-9_.-]+$', username.lstrip('@')):
         bot.send_message(chat_id, "❌ اسم المستخدم غير صالح. يرجى إدخال اسم مستخدم صحيح.")
+        return
+
+    # Determine target chat and verify bot access
+    target_chat = str(chat_id)
+    target_name = "محادثتك الخاصة"
+    
+    if len(parts) >= 3:
+        input_chat = parts[2].strip()
+        try:
+            chat_info = bot.get_chat(input_chat)
+            target_chat = str(chat_info.id)
+            target_name = f"القناة/المجموعة: {chat_info.title or chat_info.username or input_chat}"
+        except Exception as e:
+            bot.send_message(
+                chat_id,
+                f"❌ تعذر الوصول إلى القناة/المجموعة '{input_chat}'.\n"
+                f"تأكد من إضافة البوت كمسؤول (Administrator) فيها أولاً، وأن المعرف صحيح.\n"
+                f"الخطأ: {e}"
+            )
+            return
+
+    # Check limit of 10 followed accounts for the target chat
+    if get_follow_count(target_chat) >= 10:
+        bot.send_message(chat_id, f"❌ لقد تجاوزت القناة/الوجهة المحددة الحد الأقصى للمتابعة (10 حسابات).")
         return
         
     bot.send_message(chat_id, f"🔍 جاري التحقق من الحساب @{username.lstrip('@')}...")
@@ -400,8 +419,15 @@ def handle_follow(message):
     if not items:
         # User has no posts, but account exists
         logger.info(f"User @{username} has no posts. Initializing tracking with empty shortcode.")
-        follow_user(chat_id, username, "")
-        bot.send_message(chat_id, f"✅ تم بدء تتبع @{username.lstrip('@')} بنجاح! (لا توجد منشورات حالياً للبدء منها)")
+        follow_user(target_chat, username, "")
+        bot.send_message(
+            chat_id, 
+            f"✅ **تم بدء التتبع بنجاح!**\n\n"
+            f"👤 **الحساب المتابَع:** @{username.lstrip('@')}\n"
+            f"📍 **الوجهة:** {target_name}\n"
+            f"🔄 **المحتوى المشمول:** ريلز (Reels)، صور (Photos)، فيديوهات، ومنشورات متعددة (Carousels).\n"
+            f"(لا توجد منشورات حالياً للبدء منها)"
+        )
         return
         
     # Get latest post shortcode
@@ -412,12 +438,26 @@ def handle_follow(message):
     if not latest_shortcode:
         latest_shortcode = ""
         
-    follow_user(chat_id, username, latest_shortcode)
+    follow_user(target_chat, username, latest_shortcode)
+    
+    # Send test message to channel if it's not private chat
+    if target_chat != str(chat_id):
+        try:
+            bot.send_message(
+                target_chat, 
+                f"📢 **تم تفعيل تتبع Instagram في هذه القناة!**\n"
+                f"سيتم إرسال المنشورات الجديدة (ريلز، صور، فيديوهات) لحساب @{username.lstrip('@')} هنا تلقائياً."
+            )
+        except Exception as te:
+            logger.error(f"Could not send welcome message to target chat {target_chat}: {te}")
+            
     bot.send_message(
         chat_id, 
-        f"✅ تم بدء تتبع @{username.lstrip('@')} بنجاح!\n"
-        f"آخر منشور تم رصده: {latest_shortcode or 'لا يوجد'}\n"
-        "سيقوم البوت بإرسال المنشورات الجديدة فور نشرها."
+        f"✅ **تم بدء التتبع بنجاح!**\n\n"
+        f"👤 **الحساب المتابَع:** @{username.lstrip('@')}\n"
+        f"📍 **الوجهة:** {target_name}\n"
+        f"🔄 **المحتوى المشمول:** ريلز (Reels)، صور (Photos)، فيديوهات، ومنشورات متعددة (Carousels).\n"
+        f"آخر منشور تم رصده للبدء منه: `{latest_shortcode or 'لا يوجد'}`"
     )
 
 @bot.message_handler(commands=['unfollow'])
@@ -426,14 +466,28 @@ def handle_unfollow(message):
         return
         
     chat_id = message.chat.id
-    parts = message.text.split(maxsplit=1)
+    parts = message.text.split()
     if len(parts) < 2:
-        bot.send_message(chat_id, "💡 طريقة الاستخدام:\n`/unfollow username`", parse_mode="Markdown")
+        bot.send_message(chat_id, "💡 طريقة الاستخدام:\n`/unfollow username [channel_username_or_id]`", parse_mode="Markdown")
         return
         
     username = parts[1].strip()
-    unfollow_user_db(chat_id, username)
-    bot.send_message(chat_id, f"✅ تم إلغاء تتبع @{username.lstrip('@')} بنجاح.")
+    
+    target_chat = str(chat_id)
+    target_name = "محادثتك الخاصة"
+    
+    if len(parts) >= 3:
+        input_chat = parts[2].strip()
+        try:
+            chat_info = bot.get_chat(input_chat)
+            target_chat = str(chat_info.id)
+            target_name = f"القناة/المجموعة: {chat_info.title or chat_info.username or input_chat}"
+        except Exception:
+            target_chat = input_chat
+            target_name = f"القناة/المحادثة: {input_chat}"
+            
+    unfollow_user_db(target_chat, username)
+    bot.send_message(chat_id, f"✅ تم إلغاء تتبع @{username.lstrip('@')} لـ {target_name} بنجاح.")
 
 @bot.message_handler(commands=['following'])
 def handle_following(message):
@@ -441,16 +495,35 @@ def handle_following(message):
         return
         
     chat_id = message.chat.id
-    followed = get_followed_users(chat_id)
+    all_subs = get_all_subscriptions()
     
-    if not followed:
+    if not all_subs:
         bot.send_message(chat_id, "ℹ️ أنت لا تتابع أي حساب حالياً.")
         return
         
-    msg = "📋 الحسابات التي تتابعها حالياً:\n\n"
-    for idx, user in enumerate(followed, 1):
-        msg += f"{idx}. @{user}\n"
-    bot.send_message(chat_id, msg)
+    # Group subscriptions by target chat for clear listing
+    grouped = {}
+    for sub_chat_id, username, last_sc in all_subs:
+        grouped.setdefault(sub_chat_id, []).append(username)
+        
+    msg = "📋 الحسابات التي تتابعها حالياً ومكان نشرها:\n\n"
+    
+    for sub_chat_id, usernames in grouped.items():
+        if sub_chat_id == str(chat_id):
+            name = "💬 محادثتك الخاصة"
+        else:
+            try:
+                chat_info = bot.get_chat(sub_chat_id)
+                name = f"📢 {chat_info.title or chat_info.username or sub_chat_id}"
+            except Exception:
+                name = f"📢 القناة/المحادثة ID: {sub_chat_id}"
+                
+        msg += f"📍 **{name}**:\n"
+        for user in usernames:
+            msg += f"  • @{user}\n"
+        msg += "\n"
+        
+    bot.send_message(chat_id, msg, parse_mode="Markdown")
 
 
 # ----------------- Instagram Messaging API Helpers -----------------
