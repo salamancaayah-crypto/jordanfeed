@@ -37,6 +37,10 @@ def load_env():
 
 load_env()
 
+# Cache to store the last caption shared by each user to handle carousel items (like unsupported_type videos) that lack captions in subsequent webhooks
+LAST_CAPTIONS_CACHE = {}
+LAST_CAPTIONS_CACHE_LOCK = threading.Lock()
+
 # Config parameters
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 META_VERIFY_TOKEN = os.environ.get("META_VERIFY_TOKEN", "my_secret_verify_token")
@@ -458,6 +462,9 @@ def download_and_forward_carousel(
 
 def extract_shortcode(url: str) -> str:
     """Extracts the Instagram shortcode from a Reel or Post URL."""
+    if not url or "lookaside.fbsbx.com" in url or "ig_messaging_cdn" in url:
+        return ""
+        
     # First try the corrected regex
     match = re.search(r'/(?:p|reel|tv|share/[rp]|reels)/([A-Za-z0-9_-]+)', url)
     if match:
@@ -608,6 +615,23 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
                     if url_match:
                         media_url = url_match.group(1)
                         att_type = "link"
+
+                # Caption caching logic to handle carousel items (e.g. video files sent as unsupported_type)
+                if sender_igsid:
+                    with LAST_CAPTIONS_CACHE_LOCK:
+                        if original_caption:
+                            LAST_CAPTIONS_CACHE[sender_igsid] = {
+                                "caption": original_caption,
+                                "timestamp": time.time()
+                            }
+                            logger.info(f"Cached caption for user {sender_igsid}: {original_caption[:30]}...")
+                        else:
+                            cached = LAST_CAPTIONS_CACHE.get(sender_igsid)
+                            if cached and (time.time() - cached["timestamp"] < 60):
+                                original_caption = cached["caption"]
+                                # Update timestamp to keep it alive for other slides in the same carousel
+                                cached["timestamp"] = time.time()
+                                logger.info(f"Reused cached caption for user {sender_igsid}: {original_caption[:30]}...")
                 
                 if media_url:
                     # Check if sender is mapped to a Telegram Chat ID

@@ -250,5 +250,88 @@ class TestRegramForwarder(unittest.TestCase):
             regram_forwarder.bot.send_video = original_send_video
             requests.get = original_get
 
+    def test_caption_caching_for_carousel_items(self):
+        # Link a user first
+        chat_id = "112233"
+        token, _ = create_or_get_token(chat_id)
+        link_instagram_account(token, "ig_user_carousel_test")
+        
+        # Mock download_and_forward_media
+        original_download = regram_forwarder.download_and_forward_media
+        download_args = []
+        
+        def mock_download_and_forward_media(*args, **kwargs):
+            download_args.append((args, kwargs))
+            
+        regram_forwarder.download_and_forward_media = mock_download_and_forward_media
+        
+        try:
+            # 1. Send first slide with caption "A new chapter begins 💗."
+            payload1 = {
+                "object": "instagram",
+                "entry": [{
+                    "id": "page_id_123",
+                    "time": 1234567,
+                    "messaging": [{
+                        "sender": {"id": "ig_user_carousel_test"},
+                        "recipient": {"id": "page_id_123"},
+                        "message": {
+                            "mid": "mid.slide1",
+                            "attachments": [{
+                                "type": "ig_post",
+                                "payload": {
+                                    "url": "https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=image1",
+                                    "title": "A new chapter begins 💗."
+                                }
+                            }]
+                        }
+                    }]
+                }]
+            }
+            res1 = self.client.post("/webhook", json=payload1)
+            self.assertEqual(res1.status_code, 200)
+            
+            # 2. Send second slide (video) of type "unsupported_type" with NO caption
+            payload2 = {
+                "object": "instagram",
+                "entry": [{
+                    "id": "page_id_123",
+                    "time": 1234568,
+                    "messaging": [{
+                        "sender": {"id": "ig_user_carousel_test"},
+                        "recipient": {"id": "page_id_123"},
+                        "message": {
+                            "mid": "mid.slide2",
+                            "attachments": [{
+                                "type": "unsupported_type",
+                                "payload": {
+                                    "url": "https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=video2"
+                                    # No title/caption in payload
+                                }
+                            }]
+                        }
+                    }]
+                }]
+            }
+            res2 = self.client.post("/webhook", json=payload2)
+            self.assertEqual(res2.status_code, 200)
+            
+            # Check that both downloads were triggered
+            self.assertEqual(len(download_args), 2)
+            
+            # Verify slide 1 arguments
+            args1, kwargs1 = download_args[0]
+            caption1 = kwargs1.get("original_caption") if "original_caption" in kwargs1 else args1[5]
+            self.assertEqual(caption1, "A new chapter begins 💗.")
+            
+            # Verify slide 2 arguments (should reuse the cached caption)
+            args2, kwargs2 = download_args[1]
+            caption2 = kwargs2.get("original_caption") if "original_caption" in kwargs2 else args2[5]
+            self.assertEqual(caption2, "A new chapter begins 💗.")
+            
+        finally:
+            regram_forwarder.bot.send_media = original_download
+            regram_forwarder.download_and_forward_media = original_download
+
 if __name__ == "__main__":
     unittest.main()
