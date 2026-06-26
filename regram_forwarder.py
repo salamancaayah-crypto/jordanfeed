@@ -361,31 +361,49 @@ def download_and_forward_media(
             except Exception as e:
                 logger.error(f"Error fetching creator username in background task: {e}")
 
-        caption = ""
+        # HTML escape helper
+        def escape_html(text: str) -> str:
+            if not text:
+                return ""
+            return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+        caption_parts = []
+        
+        # 1. Header (Index + Username without hashtag)
+        header_text = ""
         if index is not None and total is not None:
-            caption = f"({index}/{total})"
+            header_text = f"({index}/{total})"
             
         if creator_username:
-            if caption:
-                caption = f"{caption} #{creator_username}"
+            escaped_username = escape_html(creator_username)
+            if header_text:
+                header_text = f"{header_text} {escaped_username}"
             else:
-                caption = f"#{creator_username}"
+                header_text = escaped_username
                 
+        if header_text:
+            caption_parts.append(header_text)
+            
+        # 2. Original Caption (wrapped in <code> block to be copyable)
         if original_caption:
             original_caption_clean = original_caption.strip()
-            if caption:
-                caption = f"{caption}\n\n{original_caption_clean}"
-            else:
-                caption = original_caption_clean
-                
+            escaped_original = escape_html(original_caption_clean)
+            caption_parts.append(f"<code>{escaped_original}</code>")
+            
+        # 3. Footer (Username with hashtag)
+        if creator_username:
+            escaped_username = escape_html(creator_username)
+            caption_parts.append(f"#{escaped_username}")
+            
+        caption = "\n\n".join(caption_parts)
         if not caption:
             caption = None
             
         with open(temp_filename, "rb") as media_file:
             if is_video:
-                bot.send_video(telegram_chat_id, media_file, caption=caption)
+                bot.send_video(telegram_chat_id, media_file, caption=caption, parse_mode="HTML")
             else:
-                bot.send_photo(telegram_chat_id, media_file, caption=caption)
+                bot.send_photo(telegram_chat_id, media_file, caption=caption, parse_mode="HTML")
                 
         logger.info(f"Media forwarded successfully to Telegram.")
         

@@ -245,7 +245,7 @@ class TestRegramForwarder(unittest.TestCase):
             )
             
             self.assertEqual(len(sent_captions), 1)
-            self.assertEqual(sent_captions[0], "#creator_name\n\nOriginal Caption Here")
+            self.assertEqual(sent_captions[0], "creator_name\n\n<code>Original Caption Here</code>\n\n#creator_name")
         finally:
             regram_forwarder.bot.send_video = original_send_video
             requests.get = original_get
