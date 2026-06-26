@@ -11,6 +11,9 @@ import re
 from fastapi import FastAPI, Request, Query, HTTPException, BackgroundTasks
 from fastapi.responses import PlainTextResponse
 import telebot
+import psycopg2
+from psycopg2 import pool
+
 
 # Configure logging
 logging.basicConfig(
@@ -60,24 +63,65 @@ HOST = os.environ.get("HOST", "0.0.0.0")
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "forwarder.db")
 
 # ----------------- Database Setup -----------------
+DATABASE_URL = os.environ.get("DATABASE_URL")
+IS_POSTGRES = DATABASE_URL is not None and DATABASE_URL.strip() != ""
+PLACEHOLDER = "%s" if IS_POSTGRES else "?"
+
+if IS_POSTGRES:
+    try:
+        connection_pool = pool.SimpleConnectionPool(
+            1, 5,
+            DATABASE_URL,
+            connect_timeout=10
+        )
+        logger.info("Neon PostgreSQL connection pool initialized.")
+    except Exception as e:
+        logger.critical(f"Failed to initialize PostgreSQL connection pool: {e}")
+        raise e
+else:
+    connection_pool = None
+
+def get_db_connection():
+    if IS_POSTGRES and connection_pool:
+        return connection_pool.getconn()
+    else:
+        return sqlite3.connect(DB_PATH, timeout=30.0)
+
+def release_db_connection(conn):
+    if IS_POSTGRES and connection_pool:
+        connection_pool.putconn(conn)
+    else:
+        conn.close()
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn = get_db_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS mappings (
-                telegram_chat_id TEXT PRIMARY KEY,
-                instagram_igsid TEXT,
-                link_token TEXT,
-                linked_at INTEGER
-            )
-        """)
-        # Migration: add instagram_username column if not present
-        try:
-            cursor.execute("ALTER TABLE mappings ADD COLUMN instagram_username TEXT")
-            logger.info("Database migration: Added instagram_username column.")
-        except sqlite3.OperationalError:
-            pass
+        if IS_POSTGRES:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS mappings (
+                    telegram_chat_id TEXT PRIMARY KEY,
+                    instagram_igsid TEXT,
+                    link_token TEXT,
+                    linked_at INTEGER,
+                    instagram_username TEXT
+                )
+            """)
+        else:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS mappings (
+                    telegram_chat_id TEXT PRIMARY KEY,
+                    instagram_igsid TEXT,
+                    link_token TEXT,
+                    linked_at INTEGER
+                )
+            """)
+            # Migration: add instagram_username column if not present
+            try:
+                cursor.execute("ALTER TABLE mappings ADD COLUMN instagram_username TEXT")
+                logger.info("Database migration: Added instagram_username column.")
+            except sqlite3.OperationalError:
+                pass
 
         # Create follows table
         cursor.execute("""
@@ -91,25 +135,35 @@ def init_db():
         logger.info("Database: Created/verified 'follows' table.")
             
         # Pre-insert user's mapping so it survives container restarts
-        cursor.execute("""
-            INSERT OR REPLACE INTO mappings (telegram_chat_id, instagram_igsid, link_token, linked_at)
-            VALUES ('338725979', '814728531594388', 'REG-TJVE', 1)
-        """)
+        if IS_POSTGRES:
+            cursor.execute("""
+                INSERT INTO mappings (telegram_chat_id, instagram_igsid, link_token, linked_at)
+                VALUES ('338725979', '814728531594388', 'REG-TJVE', 1)
+                ON CONFLICT (telegram_chat_id) DO UPDATE SET
+                    instagram_igsid = EXCLUDED.instagram_igsid,
+                    link_token = EXCLUDED.link_token,
+                    linked_at = EXCLUDED.linked_at
+            """)
+        else:
+            cursor.execute("""
+                INSERT OR REPLACE INTO mappings (telegram_chat_id, instagram_igsid, link_token, linked_at)
+                VALUES ('338725979', '814728531594388', 'REG-TJVE', 1)
+            """)
         conn.commit()
     finally:
-        conn.close()
+        release_db_connection(conn)
     logger.info("Database initialized successfully.")
 
 init_db()
 
 # DB Helper functions
 def create_or_get_token(chat_id):
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn = get_db_connection()
     try:
         cursor = conn.cursor()
         
         # Check if user already exists
-        cursor.execute("SELECT link_token, instagram_igsid FROM mappings WHERE telegram_chat_id = ?", (str(chat_id),))
+        cursor.execute(f"SELECT link_token, instagram_igsid FROM mappings WHERE telegram_chat_id = {PLACEHOLDER}", (str(chat_id),))
         row = cursor.fetchone()
         
         if row:
@@ -121,28 +175,28 @@ def create_or_get_token(chat_id):
         token = f"REG-{random_str}"
         
         cursor.execute(
-            "INSERT INTO mappings (telegram_chat_id, link_token, linked_at) VALUES (?, ?, ?)",
+            f"INSERT INTO mappings (telegram_chat_id, link_token, linked_at) VALUES ({PLACEHOLDER}, {PLACEHOLDER}, {PLACEHOLDER})",
             (str(chat_id), token, int(threading.Event().is_set())) # Placeholder for timestamp
         )
         conn.commit()
         logger.info(f"Generated new token {token} for Telegram Chat ID {chat_id}")
         return token, None
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 def link_instagram_account(token, igsid):
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn = get_db_connection()
     try:
         cursor = conn.cursor()
         
         # Find token
-        cursor.execute("SELECT telegram_chat_id FROM mappings WHERE link_token = ?", (token.strip().upper(),))
+        cursor.execute(f"SELECT telegram_chat_id FROM mappings WHERE link_token = {PLACEHOLDER}", (token.strip().upper(),))
         row = cursor.fetchone()
         
         if row:
             chat_id = row[0]
             cursor.execute(
-                "UPDATE mappings SET instagram_igsid = ?, linked_at = ? WHERE link_token = ?",
+                f"UPDATE mappings SET instagram_igsid = {PLACEHOLDER}, linked_at = {PLACEHOLDER} WHERE link_token = {PLACEHOLDER}",
                 (igsid, int(threading.Event().is_set()), token.strip().upper())
             )
             conn.commit()
@@ -151,79 +205,87 @@ def link_instagram_account(token, igsid):
             
         return None
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 # Auto-tracking DB helper functions
 def follow_user(chat_id, username, last_shortcode):
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn = get_db_connection()
     try:
         cursor = conn.cursor()
         cleaned_username = username.strip().lower().lstrip('@')
-        cursor.execute(
-            "INSERT OR REPLACE INTO follows (telegram_chat_id, instagram_username, last_shortcode) VALUES (?, ?, ?)",
-            (str(chat_id), cleaned_username, last_shortcode)
-        )
+        if IS_POSTGRES:
+            cursor.execute("""
+                INSERT INTO follows (telegram_chat_id, instagram_username, last_shortcode)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (telegram_chat_id, instagram_username)
+                DO UPDATE SET last_shortcode = EXCLUDED.last_shortcode
+            """, (str(chat_id), cleaned_username, last_shortcode))
+        else:
+            cursor.execute("""
+                INSERT OR REPLACE INTO follows (telegram_chat_id, instagram_username, last_shortcode)
+                VALUES (?, ?, ?)
+            """, (str(chat_id), cleaned_username, last_shortcode))
         conn.commit()
         logger.info(f"DB: Chat {chat_id} followed {cleaned_username} starting at shortcode {last_shortcode}")
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 def unfollow_user_db(chat_id, username):
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn = get_db_connection()
     try:
         cursor = conn.cursor()
         cleaned_username = username.strip().lower().lstrip('@')
         cursor.execute(
-            "DELETE FROM follows WHERE telegram_chat_id = ? AND instagram_username = ?",
+            f"DELETE FROM follows WHERE telegram_chat_id = {PLACEHOLDER} AND instagram_username = {PLACEHOLDER}",
             (str(chat_id), cleaned_username)
         )
         conn.commit()
         logger.info(f"DB: Chat {chat_id} unfollowed {cleaned_username}")
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 def get_followed_users(chat_id):
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn = get_db_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT instagram_username FROM follows WHERE telegram_chat_id = ?", (str(chat_id),))
+        cursor.execute(f"SELECT instagram_username FROM follows WHERE telegram_chat_id = {PLACEHOLDER}", (str(chat_id),))
         rows = cursor.fetchall()
         return [row[0] for row in rows]
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 def get_follow_count(chat_id):
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn = get_db_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM follows WHERE telegram_chat_id = ?", (str(chat_id),))
+        cursor.execute(f"SELECT COUNT(*) FROM follows WHERE telegram_chat_id = {PLACEHOLDER}", (str(chat_id),))
         row = cursor.fetchone()
         return row[0] if row else 0
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 def update_last_shortcode(chat_id, username, shortcode):
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn = get_db_connection()
     try:
         cursor = conn.cursor()
         cleaned_username = username.strip().lower().lstrip('@')
         cursor.execute(
-            "UPDATE follows SET last_shortcode = ? WHERE telegram_chat_id = ? AND instagram_username = ?",
+            f"UPDATE follows SET last_shortcode = {PLACEHOLDER} WHERE telegram_chat_id = {PLACEHOLDER} AND instagram_username = {PLACEHOLDER}",
             (shortcode, str(chat_id), cleaned_username)
         )
         conn.commit()
         logger.info(f"DB: Updated last_shortcode for chat {chat_id}, user {cleaned_username} to {shortcode}")
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 def get_all_subscriptions():
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn = get_db_connection()
     try:
         cursor = conn.cursor()
         cursor.execute("SELECT telegram_chat_id, instagram_username, last_shortcode FROM follows")
         return cursor.fetchall()
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 
 
@@ -280,16 +342,16 @@ def get_creator_username(shortcode: str) -> str:
     return ""
 
 def get_telegram_chat_id(igsid):
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn = get_db_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT telegram_chat_id FROM mappings WHERE instagram_igsid = ?", (str(igsid),))
+        cursor.execute(f"SELECT telegram_chat_id FROM mappings WHERE instagram_igsid = {PLACEHOLDER}", (str(igsid),))
         row = cursor.fetchone()
         if row:
             return row[0]
         return None
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 
 # ----------------- Telegram Bot Setup -----------------
