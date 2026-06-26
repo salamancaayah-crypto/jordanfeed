@@ -61,82 +61,170 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "forwarder.db
 
 # ----------------- Database Setup -----------------
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS mappings (
-            telegram_chat_id TEXT PRIMARY KEY,
-            instagram_igsid TEXT,
-            link_token TEXT,
-            linked_at INTEGER
-        )
-    """)
-    # Migration: add instagram_username column if not present
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
     try:
-        cursor.execute("ALTER TABLE mappings ADD COLUMN instagram_username TEXT")
-        logger.info("Database migration: Added instagram_username column.")
-    except sqlite3.OperationalError:
-        pass
-        
-    # Pre-insert user's mapping so it survives container restarts
-    cursor.execute("""
-        INSERT OR REPLACE INTO mappings (telegram_chat_id, instagram_igsid, link_token, linked_at)
-        VALUES ('338725979', '814728531594388', 'REG-TJVE', 1)
-    """)
-    conn.commit()
-    conn.close()
-    logger.info("Database initialized successfully with default mapping.")
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS mappings (
+                telegram_chat_id TEXT PRIMARY KEY,
+                instagram_igsid TEXT,
+                link_token TEXT,
+                linked_at INTEGER
+            )
+        """)
+        # Migration: add instagram_username column if not present
+        try:
+            cursor.execute("ALTER TABLE mappings ADD COLUMN instagram_username TEXT")
+            logger.info("Database migration: Added instagram_username column.")
+        except sqlite3.OperationalError:
+            pass
+
+        # Create follows table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS follows (
+                telegram_chat_id TEXT,
+                instagram_username TEXT,
+                last_shortcode TEXT,
+                PRIMARY KEY (telegram_chat_id, instagram_username)
+            )
+        """)
+        logger.info("Database: Created/verified 'follows' table.")
+            
+        # Pre-insert user's mapping so it survives container restarts
+        cursor.execute("""
+            INSERT OR REPLACE INTO mappings (telegram_chat_id, instagram_igsid, link_token, linked_at)
+            VALUES ('338725979', '814728531594388', 'REG-TJVE', 1)
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+    logger.info("Database initialized successfully.")
 
 init_db()
 
 # DB Helper functions
 def create_or_get_token(chat_id):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    # Check if user already exists
-    cursor.execute("SELECT link_token, instagram_igsid FROM mappings WHERE telegram_chat_id = ?", (str(chat_id),))
-    row = cursor.fetchone()
-    
-    if row:
-        token, igsid = row
-        conn.close()
-        return token, igsid
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    try:
+        cursor = conn.cursor()
         
-    # Generate new token REG-XXXX
-    random_str = "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
-    token = f"REG-{random_str}"
-    
-    cursor.execute(
-        "INSERT INTO mappings (telegram_chat_id, link_token, linked_at) VALUES (?, ?, ?)",
-        (str(chat_id), token, int(threading.Event().is_set())) # Placeholder for timestamp
-    )
-    conn.commit()
-    conn.close()
-    logger.info(f"Generated new token {token} for Telegram Chat ID {chat_id}")
-    return token, None
-
-def link_instagram_account(token, igsid):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    # Find token
-    cursor.execute("SELECT telegram_chat_id FROM mappings WHERE link_token = ?", (token.strip().upper(),))
-    row = cursor.fetchone()
-    
-    if row:
-        chat_id = row[0]
+        # Check if user already exists
+        cursor.execute("SELECT link_token, instagram_igsid FROM mappings WHERE telegram_chat_id = ?", (str(chat_id),))
+        row = cursor.fetchone()
+        
+        if row:
+            token, igsid = row
+            return token, igsid
+            
+        # Generate new token REG-XXXX
+        random_str = "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
+        token = f"REG-{random_str}"
+        
         cursor.execute(
-            "UPDATE mappings SET instagram_igsid = ?, linked_at = ? WHERE link_token = ?",
-            (igsid, int(threading.Event().is_set()), token.strip().upper())
+            "INSERT INTO mappings (telegram_chat_id, link_token, linked_at) VALUES (?, ?, ?)",
+            (str(chat_id), token, int(threading.Event().is_set())) # Placeholder for timestamp
         )
         conn.commit()
+        logger.info(f"Generated new token {token} for Telegram Chat ID {chat_id}")
+        return token, None
+    finally:
         conn.close()
-        logger.info(f"Successfully linked IG {igsid} to Telegram Chat ID {chat_id}")
-        return chat_id
+
+def link_instagram_account(token, igsid):
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    try:
+        cursor = conn.cursor()
         
-    conn.close()
-    return None
+        # Find token
+        cursor.execute("SELECT telegram_chat_id FROM mappings WHERE link_token = ?", (token.strip().upper(),))
+        row = cursor.fetchone()
+        
+        if row:
+            chat_id = row[0]
+            cursor.execute(
+                "UPDATE mappings SET instagram_igsid = ?, linked_at = ? WHERE link_token = ?",
+                (igsid, int(threading.Event().is_set()), token.strip().upper())
+            )
+            conn.commit()
+            logger.info(f"Successfully linked IG {igsid} to Telegram Chat ID {chat_id}")
+            return chat_id
+            
+        return None
+    finally:
+        conn.close()
+
+# Auto-tracking DB helper functions
+def follow_user(chat_id, username, last_shortcode):
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    try:
+        cursor = conn.cursor()
+        cleaned_username = username.strip().lower().lstrip('@')
+        cursor.execute(
+            "INSERT OR REPLACE INTO follows (telegram_chat_id, instagram_username, last_shortcode) VALUES (?, ?, ?)",
+            (str(chat_id), cleaned_username, last_shortcode)
+        )
+        conn.commit()
+        logger.info(f"DB: Chat {chat_id} followed {cleaned_username} starting at shortcode {last_shortcode}")
+    finally:
+        conn.close()
+
+def unfollow_user_db(chat_id, username):
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    try:
+        cursor = conn.cursor()
+        cleaned_username = username.strip().lower().lstrip('@')
+        cursor.execute(
+            "DELETE FROM follows WHERE telegram_chat_id = ? AND instagram_username = ?",
+            (str(chat_id), cleaned_username)
+        )
+        conn.commit()
+        logger.info(f"DB: Chat {chat_id} unfollowed {cleaned_username}")
+    finally:
+        conn.close()
+
+def get_followed_users(chat_id):
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT instagram_username FROM follows WHERE telegram_chat_id = ?", (str(chat_id),))
+        rows = cursor.fetchall()
+        return [row[0] for row in rows]
+    finally:
+        conn.close()
+
+def get_follow_count(chat_id):
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM follows WHERE telegram_chat_id = ?", (str(chat_id),))
+        row = cursor.fetchone()
+        return row[0] if row else 0
+    finally:
+        conn.close()
+
+def update_last_shortcode(chat_id, username, shortcode):
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    try:
+        cursor = conn.cursor()
+        cleaned_username = username.strip().lower().lstrip('@')
+        cursor.execute(
+            "UPDATE follows SET last_shortcode = ? WHERE telegram_chat_id = ? AND instagram_username = ?",
+            (shortcode, str(chat_id), cleaned_username)
+        )
+        conn.commit()
+        logger.info(f"DB: Updated last_shortcode for chat {chat_id}, user {cleaned_username} to {shortcode}")
+    finally:
+        conn.close()
+
+def get_all_subscriptions():
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT telegram_chat_id, instagram_username, last_shortcode FROM follows")
+        return cursor.fetchall()
+    finally:
+        conn.close()
+
 
 
 
@@ -192,20 +280,68 @@ def get_creator_username(shortcode: str) -> str:
     return ""
 
 def get_telegram_chat_id(igsid):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT telegram_chat_id FROM mappings WHERE instagram_igsid = ?", (str(igsid),))
-    row = cursor.fetchone()
-    conn.close()
-    if row:
-        return row[0]
-    return None
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT telegram_chat_id FROM mappings WHERE instagram_igsid = ?", (str(igsid),))
+        row = cursor.fetchone()
+        if row:
+            return row[0]
+        return None
+    finally:
+        conn.close()
+
 
 # ----------------- Telegram Bot Setup -----------------
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
+ALLOWED_CHAT_ID = os.environ.get("ALLOWED_CHAT_ID", "338725979")
+
+def is_allowed_user(message):
+    chat_id = str(message.chat.id)
+    if chat_id != ALLOWED_CHAT_ID:
+        logger.warning(f"Unauthorized access attempt by Chat ID {chat_id}")
+        try:
+            bot.send_message(message.chat.id, "⚠️ هذا البوت شخصي ومغلق للاستخدام العام.")
+        except Exception as e:
+            logger.error(f"Failed to send unauthorized warning: {e}")
+        return False
+    return True
+
+RSS_BRIDGE_INSTANCES = [
+    "https://rss-bridge.sans-nuage.fr",
+    "https://rss-bridge.org/bridge01",
+    "https://rss-bridge.cheredeprince.net",
+    "https://rss-bridge.lewd.tech"
+]
+
+def fetch_rss_feed(username):
+    cleaned_username = username.strip().lower().lstrip('@')
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    for instance in RSS_BRIDGE_INSTANCES:
+        url = f"{instance}/?action=display&bridge=InstagramBridge&u={cleaned_username}&format=Json"
+        try:
+            logger.info(f"Fetching RSS feed for '{cleaned_username}' from {instance}...")
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                if "items" in data:
+                    logger.info(f"Successfully fetched feed from {instance} for '{cleaned_username}' with {len(data['items'])} items.")
+                    return data["items"]
+            logger.warning(f"Instance {instance} returned status code {res.status_code} for user '{cleaned_username}'")
+        except Exception as e:
+            logger.error(f"Error fetching from instance {instance} for user '{cleaned_username}': {e}")
+            
+    logger.error(f"All RSS-Bridge instances failed to fetch feed for user '{cleaned_username}'.")
+    return None
 
 @bot.message_handler(commands=['start'])
 def handle_start(message):
+    if not is_allowed_user(message):
+        return
+        
     chat_id = message.chat.id
     token, igsid = create_or_get_token(chat_id)
     
@@ -225,6 +361,97 @@ def handle_start(message):
             "💡 بمجرد إرسال الكود، سيتم ربط حسابك وستتمكن من مشاركة أي فيديو ريلز مباشرة لحساب البوت لتصلك هنا!"
         )
     bot.send_message(chat_id, welcome_msg, parse_mode="Markdown")
+
+@bot.message_handler(commands=['follow'])
+def handle_follow(message):
+    if not is_allowed_user(message):
+        return
+        
+    chat_id = message.chat.id
+    
+    # Check limit of 10 followed accounts
+    if get_follow_count(chat_id) >= 10:
+        bot.send_message(chat_id, "❌ لقد تجاوزت الحد الأقصى للمتابعة (10 حسابات). يرجى إلغاء متابعة حساب أولاً باستخدام /unfollow.")
+        return
+        
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.send_message(chat_id, "💡 طريقة الاستخدام:\n`/follow username`", parse_mode="Markdown")
+        return
+        
+    username = parts[1].strip()
+    # Basic validation
+    if not re.match(r'^[A-Za-z0-9_.-]+$', username.lstrip('@')):
+        bot.send_message(chat_id, "❌ اسم المستخدم غير صالح. يرجى إدخال اسم مستخدم صحيح.")
+        return
+        
+    bot.send_message(chat_id, f"🔍 جاري التحقق من الحساب @{username.lstrip('@')}...")
+    
+    # Try to fetch feed to verify public existence and get latest shortcode
+    items = fetch_rss_feed(username)
+    if items is None:
+        bot.send_message(
+            chat_id, 
+            f"❌ تعذر العثور على الحساب @{username.lstrip('@')} أو قد يكون حساباً خاصاً (Private).\n"
+            "تأكد من كتابة الاسم بشكل صحيح ومن كون الحساب عاماً."
+        )
+        return
+        
+    if not items:
+        # User has no posts, but account exists
+        logger.info(f"User @{username} has no posts. Initializing tracking with empty shortcode.")
+        follow_user(chat_id, username, "")
+        bot.send_message(chat_id, f"✅ تم بدء تتبع @{username.lstrip('@')} بنجاح! (لا توجد منشورات حالياً للبدء منها)")
+        return
+        
+    # Get latest post shortcode
+    latest_item = items[0]
+    latest_url = latest_item.get("url", "")
+    latest_shortcode = extract_shortcode(latest_url)
+    
+    if not latest_shortcode:
+        latest_shortcode = ""
+        
+    follow_user(chat_id, username, latest_shortcode)
+    bot.send_message(
+        chat_id, 
+        f"✅ تم بدء تتبع @{username.lstrip('@')} بنجاح!\n"
+        f"آخر منشور تم رصده: {latest_shortcode or 'لا يوجد'}\n"
+        "سيقوم البوت بإرسال المنشورات الجديدة فور نشرها."
+    )
+
+@bot.message_handler(commands=['unfollow'])
+def handle_unfollow(message):
+    if not is_allowed_user(message):
+        return
+        
+    chat_id = message.chat.id
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.send_message(chat_id, "💡 طريقة الاستخدام:\n`/unfollow username`", parse_mode="Markdown")
+        return
+        
+    username = parts[1].strip()
+    unfollow_user_db(chat_id, username)
+    bot.send_message(chat_id, f"✅ تم إلغاء تتبع @{username.lstrip('@')} بنجاح.")
+
+@bot.message_handler(commands=['following'])
+def handle_following(message):
+    if not is_allowed_user(message):
+        return
+        
+    chat_id = message.chat.id
+    followed = get_followed_users(chat_id)
+    
+    if not followed:
+        bot.send_message(chat_id, "ℹ️ أنت لا تتابع أي حساب حالياً.")
+        return
+        
+    msg = "📋 الحسابات التي تتابعها حالياً:\n\n"
+    for idx, user in enumerate(followed, 1):
+        msg += f"{idx}. @{user}\n"
+    bot.send_message(chat_id, msg)
+
 
 # ----------------- Instagram Messaging API Helpers -----------------
 def send_instagram_dm(recipient_igsid, text_message):
@@ -250,17 +477,190 @@ def send_instagram_dm(recipient_igsid, text_message):
     except Exception as e:
         logger.error(f"Error sending Instagram DM: {e}")
 
-# ----------------- FastAPI Webhook Server -----------------
-app = FastAPI(title="Instagram Telegram Webhook Linker")
+# ----------------- Instagram Auto-Tracking Logic -----------------
+def forward_tracked_post(chat_id, username, shortcode, title=""):
+    """
+    Resolves, downloads, and forwards a tracked post to Telegram.
+    Returns True if successfully sent, False on failure.
+    """
+    post_url = f"https://www.instagram.com/p/{shortcode}/"
+    logger.info(f"Forwarding tracked post {shortcode} for @{username} to chat {chat_id}...")
+    
+    # Try to resolve via proxy
+    carousel_urls = []
+    try:
+        carousel_urls = resolve_via_proxy(post_url, "vxinstagram.com")
+        if not carousel_urls:
+            logger.info("vxinstagram failed. Trying ddinstagram...")
+            carousel_urls = resolve_via_proxy(post_url, "ddinstagram.com")
+    except Exception as e:
+        logger.error(f"Error resolving tracked post {shortcode} via proxies: {e}")
 
-@app.on_event("startup")
-def startup_event():
-    if not TELEGRAM_TOKEN:
-        logger.error("TELEGRAM_TOKEN is missing! Cannot start Telegram polling.")
-        return
-    # Start Telegram Polling in background thread
-    tg_thread = threading.Thread(target=run_telegram_polling, daemon=True)
-    tg_thread.start()
+    try:
+        if carousel_urls:
+            if len(carousel_urls) > 1:
+                # Carousel post
+                logger.info(f"Forwarding tracked carousel with {len(carousel_urls)} items to chat {chat_id}")
+                download_and_forward_carousel(
+                    carousel_urls,
+                    str(chat_id),
+                    original_caption=title,
+                    shortcode=shortcode,
+                    raise_on_error=True
+                )
+            else:
+                # Single media post
+                url_to_use, type_to_use = carousel_urls[0]
+                logger.info(f"Forwarding tracked single media of type {type_to_use} to chat {chat_id}")
+                download_and_forward_media(
+                    url_to_use,
+                    type_to_use,
+                    str(chat_id),
+                    original_caption=title,
+                    shortcode=shortcode,
+                    creator_username=username,
+                    raise_on_error=True
+                )
+        else:
+            # Fallback if proxy failed: send text link directly so they don't miss it
+            logger.warning(f"Could not resolve tracked post {shortcode} via proxies. Sending fallback link.")
+            fallback_text = (
+                f"📢 **منشور جديد من @{username}**\n\n"
+                f"<code>{title}</code>\n\n"
+                f"🔗 {post_url}"
+            )
+            bot.send_message(chat_id, fallback_text, parse_mode="HTML")
+            
+        logger.info(f"Tracked post {shortcode} forwarded successfully to chat {chat_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to forward tracked post {shortcode} to chat {chat_id}: {e}")
+        return False
+
+
+def run_auto_track_loop():
+    logger.info("Starting Instagram Auto-tracking background loop...")
+    
+    # Run immediate check on boot, then enter periodic check
+    while True:
+        try:
+            logger.info("Auto-track loop: Starting checking cycle...")
+            all_subs = get_all_subscriptions()
+            
+            if not all_subs:
+                logger.info("Auto-track loop: No active tracking subscriptions.")
+            else:
+                # Group by username to deduplicate requests
+                by_username = {}
+                for chat_id, username, last_shortcode in all_subs:
+                    by_username.setdefault(username, []).append((chat_id, last_shortcode))
+                
+                # Fetch feeds and process
+                for username, subscribers in by_username.items():
+                    try:
+                        items = fetch_rss_feed(username)
+                        if items is None:
+                            logger.warning(f"Auto-track loop: Skipping @{username} due to feed fetch error.")
+                            continue
+                        if not items:
+                            logger.info(f"Auto-track loop: @{username} has no posts in feed.")
+                            continue
+                            
+                        # Process for each subscriber
+                        for chat_id, last_shortcode in subscribers:
+                            try:
+                                if not last_shortcode:
+                                    # Initialize tracking for new subscription
+                                    newest_item = items[0]
+                                    newest_url = newest_item.get("url", "")
+                                    newest_shortcode = extract_shortcode(newest_url)
+                                    if newest_shortcode:
+                                        update_last_shortcode(chat_id, username, newest_shortcode)
+                                        logger.info(f"Auto-track loop: Initialized tracking for @{username} for chat {chat_id} at {newest_shortcode}")
+                                    continue
+                                    
+                                # Search for last_shortcode index in the feed
+                                found_idx = -1
+                                for i, item in enumerate(items):
+                                    shortcode = extract_shortcode(item.get("url", ""))
+                                    if shortcode == last_shortcode:
+                                        found_idx = i
+                                        break
+                                        
+                                if found_idx != -1:
+                                    # New posts are those in index 0 to found_idx - 1
+                                    new_posts_items = items[0:found_idx]
+                                    # Process oldest first (reverse it)
+                                    new_posts_items.reverse()
+                                    
+                                    logger.info(f"Auto-track loop: Found {len(new_posts_items)} new posts for @{username} (chat {chat_id})")
+                                    
+                                    # Forward each post
+                                    for item in new_posts_items:
+                                        post_url = item.get("url", "")
+                                        shortcode = extract_shortcode(post_url)
+                                        title = item.get("title", "")
+                                        
+                                        if not shortcode:
+                                            continue
+                                            
+                                        # Forward post
+                                        success = forward_tracked_post(chat_id, username, shortcode, title)
+                                        if success:
+                                            # Update last shortcode to keep progress
+                                            update_last_shortcode(chat_id, username, shortcode)
+                                            # Sleep 0.5s between consecutive Telegram messages for rate limits
+                                            time.sleep(0.5)
+                                        else:
+                                            # Stop processing for this user, retry in next cycle
+                                            logger.warning(f"Auto-track loop: Failed to forward post {shortcode} for @{username} to chat {chat_id}. Stopping queue for this cycle.")
+                                            break
+                                else:
+                                    # last_shortcode not found in the feed, reset and warn the user
+                                    logger.warning(f"Auto-track loop: last_shortcode '{last_shortcode}' not found in feed of @{username} for chat {chat_id}. Resetting track.")
+                                    newest_item = items[0]
+                                    newest_url = newest_item.get("url", "")
+                                    newest_shortcode = extract_shortcode(newest_url)
+                                    if newest_shortcode:
+                                        update_last_shortcode(chat_id, username, newest_shortcode)
+                                        try:
+                                            bot.send_message(chat_id, f"⚠️ تم إعادة مزامنة متابعة @{username}")
+                                        except Exception as te:
+                                            logger.error(f"Failed to send resync message to Telegram chat {chat_id}: {te}")
+                            except Exception as sub_e:
+                                logger.error(f"Auto-track loop: Error processing subscriber {chat_id} for @{username}: {sub_e}")
+                                
+                    except Exception as user_e:
+                        logger.error(f"Auto-track loop: Error processing username @{username}: {user_e}")
+                    
+                    # Sleep 3-5 seconds between checking different usernames to rate-limit request spam
+                    time.sleep(random.randint(3, 5))
+                    
+        except Exception as cycle_e:
+            logger.error(f"Auto-track loop: Cycle crashed with error: {cycle_e}")
+            
+        logger.info("Auto-track loop: Checking cycle finished. Sleeping for 15 minutes...")
+        time.sleep(900)
+
+
+# ----------------- FastAPI Webhook Server -----------------
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if TELEGRAM_TOKEN:
+        # Start Telegram Polling in background thread
+        tg_thread = threading.Thread(target=run_telegram_polling, daemon=True)
+        tg_thread.start()
+        
+        # Start Instagram Auto-tracking background thread
+        track_thread = threading.Thread(target=run_auto_track_loop, daemon=True)
+        track_thread.start()
+    else:
+        logger.error("TELEGRAM_TOKEN is missing! Cannot start Telegram polling or tracking.")
+    yield
+
+app = FastAPI(title="Instagram Telegram Webhook Linker", lifespan=lifespan)
 
 
 @app.get("/webhook", response_class=PlainTextResponse)
@@ -294,7 +694,8 @@ def download_and_forward_media(
     total: int = None,
     original_caption: str = "",
     shortcode: str = "",
-    creator_username: str = ""
+    creator_username: str = "",
+    raise_on_error: bool = False
 ):
     """Downloads media from CDN and forwards to Telegram."""
     temp_filename = f"temp_media_{random.randint(1000, 9999)}"
@@ -314,7 +715,12 @@ def download_and_forward_media(
             logger.error(f"Failed to download media from CDN. HTTP Status: {response.status_code}")
             # Only send error message on Telegram if it's the first slide or a single media to avoid spam
             if index is None or index == 1:
-                bot.send_message(telegram_chat_id, "❌ فشل تحميل الفيديو/المنشور من خوادم إنستغرام.")
+                try:
+                    bot.send_message(telegram_chat_id, "❌ فشل تحميل الفيديو/المنشور من خوادم إنستغرام.")
+                except Exception:
+                    pass
+            if raise_on_error:
+                raise Exception(f"HTTP Status {response.status_code} when downloading CDN media")
             return
 
         # Check if we accidentally downloaded an HTML page (e.g. if the proxy failed or link was private)
@@ -322,7 +728,12 @@ def download_and_forward_media(
         if "text/html" in content_type:
             logger.error(f"Failed to download media: server returned HTML page instead of media stream. Content-Type: {content_type}")
             if index is None or index == 1:
-                bot.send_message(telegram_chat_id, "❌ لا يمكن تحميل هذا المنشور/الريلز. قد يكون الحساب خاصاً (Private) أو الرابط غير صالح.")
+                try:
+                    bot.send_message(telegram_chat_id, "❌ لا يمكن تحميل هذا المنشور/الريلز. قد يكون الحساب خاصاً (Private) أو الرابط غير صالح.")
+                except Exception:
+                    pass
+            if raise_on_error:
+                raise Exception("Server returned HTML page instead of media stream")
             return
 
         # Determine extension based on headers or simple fallback
@@ -410,7 +821,12 @@ def download_and_forward_media(
     except Exception as e:
         logger.error(f"Error during media download and forwarding: {e}")
         if index is None or index == 1:
-            bot.send_message(telegram_chat_id, f"❌ حدث خطأ أثناء معالجة وإرسال الفيديو/المنشور: {e}")
+            try:
+                bot.send_message(telegram_chat_id, f"❌ حدث خطأ أثناء معالجة وإرسال الفيديو/المنشور: {e}")
+            except Exception:
+                pass
+        if raise_on_error:
+            raise e
     finally:
         # Clean up temp file
         if os.path.exists(temp_filename):
@@ -459,7 +875,8 @@ def download_and_forward_carousel(
     urls_and_types, 
     telegram_chat_id: str,
     original_caption: str = "",
-    shortcode: str = ""
+    shortcode: str = "",
+    raise_on_error: bool = False
 ):
     """Downloads all media items of a carousel sequentially with a rate-limit sleep."""
     total = len(urls_and_types)
@@ -484,10 +901,13 @@ def download_and_forward_carousel(
                 total,
                 original_caption,
                 shortcode,
-                creator_username
+                creator_username,
+                raise_on_error=raise_on_error
             )
         except Exception as e:
             logger.error(f"Failed to forward carousel item {idx+1}/{total}: {e}")
+            if raise_on_error:
+                raise e
         
         # Sleep 0.5 seconds between slides to rate limit Telegram API calls
         if idx < total - 1:

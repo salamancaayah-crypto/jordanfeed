@@ -333,5 +333,43 @@ class TestRegramForwarder(unittest.TestCase):
             regram_forwarder.bot.send_media = original_download
             regram_forwarder.download_and_forward_media = original_download
 
+    def test_auto_track_logic(self):
+        from regram_forwarder import (
+            follow_user, unfollow_user_db, get_followed_users, get_follow_count,
+            update_last_shortcode, get_all_subscriptions, is_allowed_user
+        )
+        
+        chat_id = "338725979"
+        # Test follow
+        follow_user(chat_id, "loor.med", "SC123")
+        self.assertEqual(get_follow_count(chat_id), 1)
+        self.assertEqual(get_followed_users(chat_id), ["loor.med"])
+        
+        # Test update
+        update_last_shortcode(chat_id, "loor.med", "SC456")
+        subs = get_all_subscriptions()
+        self.assertEqual(len(subs), 1)
+        self.assertEqual(subs[0], (chat_id, "loor.med", "SC456"))
+        
+        # Test access control helper
+        class MockMessage:
+            def __init__(self, c_id):
+                self.chat = type('Chat', (object,), {'id': c_id})()
+        
+        # Mock bot.send_message
+        original_send_message = regram_forwarder.bot.send_message
+        regram_forwarder.bot.send_message = lambda *args, **kwargs: None
+        try:
+            self.assertTrue(is_allowed_user(MockMessage(338725979)))
+            self.assertTrue(is_allowed_user(MockMessage("338725979")))
+            self.assertFalse(is_allowed_user(MockMessage(1111111)))
+        finally:
+            regram_forwarder.bot.send_message = original_send_message
+            
+        # Test unfollow
+        unfollow_user_db(chat_id, "loor.med")
+        self.assertEqual(get_follow_count(chat_id), 0)
+        self.assertEqual(get_followed_users(chat_id), [])
+
 if __name__ == "__main__":
     unittest.main()
