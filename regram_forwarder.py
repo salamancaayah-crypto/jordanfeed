@@ -154,18 +154,34 @@ def get_creator_username(shortcode: str) -> str:
         res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
             html = res.text
-            # Look for: "likes, comments - username on Date"
+            
+            # Method 1: Extract from the public URL path in the HTML (most robust and standard)
+            match = re.search(r'instagram\.com/([A-Za-z0-9_.-]+)/(?:p|reel|tv|reels)/', html)
+            if match:
+                username = match.group(1).strip()
+                if username not in ["p", "reel", "reels", "tv", "explore", "developer", "about", "legal", "terms", "privacy", "share"]:
+                    logger.info(f"Resolved creator username '{username}' from URL pattern for shortcode {shortcode}")
+                    return username
+                    
+            # Method 2: Extract from "username on Date" meta description
+            match = re.search(r'content="([A-Za-z0-9_.-]+)\s+on\s+[A-Z][a-z]+\s+\d+', html)
+            if match:
+                username = match.group(1).strip()
+                logger.info(f"Resolved creator username '{username}' from meta description date for shortcode {shortcode}")
+                return username
+
+            # Method 3: "likes, comments - username on Date"
             match = re.search(r'comments\s*-\s*([A-Za-z0-9_.-]+)\s+on\s+', html)
             if match:
                 username = match.group(1).strip()
-                logger.info(f"Resolved creator username '{username}' for shortcode {shortcode}")
+                logger.info(f"Resolved creator username '{username}' from comments snippet for shortcode {shortcode}")
                 return username
             
-            # Alternative: "username on Instagram"
+            # Method 4: "username on Instagram"
             match = re.search(r'content="([A-Za-z0-9_.-]+)\s+on\s+Instagram', html)
             if match:
                 username = match.group(1).strip()
-                logger.info(f"Resolved creator username '{username}' for shortcode {shortcode}")
+                logger.info(f"Resolved creator username '{username}' from Instagram meta for shortcode {shortcode}")
                 return username
                 
         else:
