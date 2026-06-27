@@ -984,7 +984,7 @@ def download_and_forward_media(
             
         with open(temp_filename, "rb") as media_file:
             if is_video:
-                bot.send_video(telegram_chat_id, media_file, caption=caption, parse_mode="HTML")
+                bot.send_video(telegram_chat_id, media_file, caption=caption, parse_mode="HTML", supports_streaming=True)
             else:
                 bot.send_photo(telegram_chat_id, media_file, caption=caption, parse_mode="HTML")
                 
