@@ -663,8 +663,11 @@ def forward_tracked_post(chat_id, username, shortcode, title=""):
     try:
         carousel_urls = resolve_via_proxy(post_url, "vxinstagram.com")
         if not carousel_urls:
-            logger.info("vxinstagram failed. Trying ddinstagram...")
-            carousel_urls = resolve_via_proxy(post_url, "ddinstagram.com")
+            logger.info("vxinstagram failed. Trying fallback to adamlikes.men...")
+            carousel_urls = resolve_via_proxy(post_url, "adamlikes.men")
+        if not carousel_urls:
+            logger.info("adamlikes.men failed. Trying fallback to instagram7.com...")
+            carousel_urls = resolve_via_proxy(post_url, "instagram7.com")
     except Exception as e:
         logger.error(f"Error resolving tracked post {shortcode} via proxies: {e}")
 
@@ -1140,7 +1143,7 @@ def resolve_via_proxy(url: str, domain: str = "vxinstagram.com"):
         return []
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "TelegramBot (like TwitterBot)"
     }
     
     urls = []
@@ -1174,6 +1177,9 @@ def resolve_via_proxy(url: str, domain: str = "vxinstagram.com"):
             if not media_url:
                 logger.info(f"No media meta tags found at index {index} on {domain}. Stopping.")
                 break
+                
+            if media_url.startswith("/"):
+                media_url = f"https://{domain}{media_url}"
                 
             # Follow redirects with a HEAD request to detect duplicate content
             try:
@@ -1301,8 +1307,11 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
                             try:
                                 carousel_urls = resolve_via_proxy(media_url, "vxinstagram.com")
                                 if not carousel_urls:
-                                    logger.info("vxinstagram failed to resolve media. Trying fallback to ddinstagram...")
-                                    carousel_urls = resolve_via_proxy(media_url, "ddinstagram.com")
+                                    logger.info("vxinstagram failed to resolve media. Trying fallback to adamlikes.men...")
+                                    carousel_urls = resolve_via_proxy(media_url, "adamlikes.men")
+                                if not carousel_urls:
+                                    logger.info("adamlikes.men failed to resolve media. Trying fallback to instagram7.com...")
+                                    carousel_urls = resolve_via_proxy(media_url, "instagram7.com")
                             except Exception as e:
                                 logger.error(f"Error resolving instagram.com URL via proxy: {e}")
                         
