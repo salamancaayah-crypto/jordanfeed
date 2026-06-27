@@ -1005,7 +1005,11 @@ def download_and_forward_media(
             doc_filename += ".mp4" if is_video else ".jpg"
             
             with open(temp_filename, "rb") as document_file:
-                bot.send_document(telegram_chat_id, (doc_filename, document_file), caption=f"📄 {doc_filename}")
+                bot.send_document(
+                    telegram_chat_id, 
+                    (doc_filename, document_file, 'application/octet-stream'), 
+                    caption=f"📄 {doc_filename}"
+                )
             logger.info("Media sent as uncompressed document successfully.")
         except Exception as doc_e:
             logger.error(f"Failed to send media as document: {doc_e}")
