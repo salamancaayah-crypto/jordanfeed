@@ -1214,33 +1214,51 @@ def resolve_via_instagrapi(url: str):
         # Disable logging for instagrapi to avoid spamming
         import logging
         logging.getLogger("instagrapi").setLevel(logging.WARNING)
+        import json
         
-        # Load session
-        session_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "insta_session.json")
-        if os.path.exists(session_path):
+        # Check environment variable first, then fallback to local file
+        session_data = os.getenv("INSTA_SESSION")
+        session_loaded = False
+        
+        if session_data:
             try:
-                cl.load_settings(session_path)
-                logger.info(f"instagrapi: Loaded session from {session_path}")
+                cl.set_settings(json.loads(session_data))
+                logger.info("instagrapi: Loaded session settings from INSTA_SESSION env var")
+                session_loaded = True
             except Exception as e:
-                logger.error(f"Failed to load instagrapi session: {e}")
+                logger.error(f"Failed to load settings from INSTA_SESSION env var: {e}")
                 
-        # Validate login status
+        if not session_loaded:
+            session_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "insta_session.json")
+            if os.path.exists(session_path):
+                try:
+                    cl.load_settings(session_path)
+                    logger.info(f"instagrapi: Loaded session settings from file {session_path}")
+                    session_loaded = True
+                except Exception as e:
+                    logger.error(f"Failed to load settings from file: {e}")
+                    
+        # Validate session login status
         logged_in = False
-        if os.path.exists(session_path):
+        if session_loaded:
             try:
                 cl.get_timeline_feed()
                 logged_in = True
                 logger.info("instagrapi: Session is valid.")
             except Exception:
                 logger.info("instagrapi: Session is invalid. Attempting login...")
-            
+                
         if not logged_in:
             user = os.getenv("INSTA_USER")
             password = os.getenv("INSTA_PASS")
             if user and password:
                 cl.login(user, password)
-                cl.dump_settings(session_path)
-                logger.info("instagrapi: Login successful and session saved.")
+                try:
+                    session_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "insta_session.json")
+                    cl.dump_settings(session_path)
+                    logger.info(f"instagrapi: Login successful and session saved to file {session_path}")
+                except Exception as dump_err:
+                    logger.warning(f"instagrapi: Login successful, but could not dump session to file: {dump_err}")
             else:
                 logger.error("instagrapi: INSTA_USER or INSTA_PASS not set in environment.")
                 return []
