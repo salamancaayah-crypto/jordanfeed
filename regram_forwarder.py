@@ -658,15 +658,12 @@ def forward_tracked_post(chat_id, username, shortcode, title=""):
     post_url = f"https://www.instagram.com/p/{shortcode}/"
     logger.info(f"Forwarding tracked post {shortcode} for @{username} to chat {chat_id}...")
     
-    # Try to resolve via proxy
+    # Try to resolve via proxies and fallback
     carousel_urls = []
     try:
-        carousel_urls = resolve_via_proxy(post_url, "www.vxinstagram.com")
-        if not carousel_urls:
-            logger.info("vxinstagram failed. Trying fallback to adamlikes.men...")
-            carousel_urls = resolve_via_proxy(post_url, "adamlikes.men")
+        carousel_urls = resolve_instagram_media(post_url)
     except Exception as e:
-        logger.error(f"Error resolving tracked post {shortcode} via proxies: {e}")
+        logger.error(f"Error resolving tracked post {shortcode}: {e}")
 
     try:
         if carousel_urls:
@@ -1204,6 +1201,103 @@ def resolve_via_proxy(url: str, domain: str = "www.vxinstagram.com"):
             
     return urls
 
+def resolve_via_instagrapi(url: str):
+    """Resolves Instagram URL using instagrapi with session fallback."""
+    shortcode = extract_shortcode(url)
+    if not shortcode:
+        return []
+        
+    try:
+        from instagrapi import Client
+        cl = Client()
+        
+        # Disable logging for instagrapi to avoid spamming
+        import logging
+        logging.getLogger("instagrapi").setLevel(logging.WARNING)
+        
+        # Load session
+        session_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "insta_session.json")
+        if os.path.exists(session_path):
+            try:
+                cl.load_settings(session_path)
+                logger.info(f"instagrapi: Loaded session from {session_path}")
+            except Exception as e:
+                logger.error(f"Failed to load instagrapi session: {e}")
+                
+        # Validate login status
+        logged_in = False
+        if os.path.exists(session_path):
+            try:
+                cl.get_timeline_feed()
+                logged_in = True
+                logger.info("instagrapi: Session is valid.")
+            except Exception:
+                logger.info("instagrapi: Session is invalid. Attempting login...")
+            
+        if not logged_in:
+            user = os.getenv("INSTA_USER")
+            password = os.getenv("INSTA_PASS")
+            if user and password:
+                cl.login(user, password)
+                cl.dump_settings(session_path)
+                logger.info("instagrapi: Login successful and session saved.")
+            else:
+                logger.error("instagrapi: INSTA_USER or INSTA_PASS not set in environment.")
+                return []
+                
+        # Get media info
+        media_pk = cl.media_pk_from_url(f"https://www.instagram.com/reel/{shortcode}/")
+        media_info = cl.media_info(media_pk)
+        
+        if media_info.media_type == 2: # Video
+            return [(str(media_info.video_url), "VIDEO")]
+        elif media_info.media_type == 1: # Image
+            return [(str(media_info.thumbnail_url or media_info.resources[0].thumbnail_url), "IMAGE")]
+        elif media_info.media_type == 8: # Carousel
+            urls = []
+            for item in media_info.resources:
+                if item.media_type == 2:
+                    urls.append((str(item.video_url), "VIDEO"))
+                else:
+                    urls.append((str(item.thumbnail_url or item.video_url), "IMAGE"))
+            return urls
+    except Exception as e:
+        logger.error(f"instagrapi fallback failed for shortcode {shortcode}: {e}")
+        
+    return []
+
+def resolve_instagram_media(url: str):
+    """Resolves Instagram URL to media URLs using proxy list first, and falls back to instagrapi."""
+    # 1. Try www.vxinstagram.com
+    try:
+        urls = resolve_via_proxy(url, "www.vxinstagram.com")
+        if urls:
+            logger.info("Resolved successfully via www.vxinstagram.com")
+            return urls
+    except Exception as e:
+        logger.error(f"www.vxinstagram.com failed: {e}")
+        
+    # 2. Try adamlikes.men
+    try:
+        urls = resolve_via_proxy(url, "adamlikes.men")
+        if urls:
+            logger.info("Resolved successfully via adamlikes.men")
+            return urls
+    except Exception as e:
+        logger.error(f"adamlikes.men failed: {e}")
+        
+    # 3. Fallback to instagrapi (private API with saved session)
+    logger.info("Proxies failed. Attempting fallback to instagrapi...")
+    try:
+        urls = resolve_via_instagrapi(url)
+        if urls:
+            logger.info("Resolved successfully via instagrapi fallback")
+            return urls
+    except Exception as e:
+        logger.error(f"instagrapi fallback failed: {e}")
+        
+    return []
+
 @app.post("/webhook")
 async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
     """Processes incoming Instagram Messaging events from Meta."""
@@ -1299,15 +1393,12 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
                         
                         carousel_urls = []
                         
-                        # 1. Try to resolve the URL using the proxy if it is a public instagram.com URL
+                        # 1. Try to resolve the URL using the proxy/instagrapi fallback if it is a public instagram.com URL
                         if "instagram.com" in media_url:
                             try:
-                                carousel_urls = resolve_via_proxy(media_url, "www.vxinstagram.com")
-                                if not carousel_urls:
-                                    logger.info("vxinstagram failed to resolve media. Trying fallback to adamlikes.men...")
-                                    carousel_urls = resolve_via_proxy(media_url, "adamlikes.men")
+                                carousel_urls = resolve_instagram_media(media_url)
                             except Exception as e:
-                                logger.error(f"Error resolving instagram.com URL via proxy: {e}")
+                                logger.error(f"Error resolving instagram.com URL: {e}")
                         
                         # 2. Fallback to Facebook Graph API for Lookaside URLs if we have a media ID
                         if not carousel_urls and media_id and META_ACCESS_TOKEN:
