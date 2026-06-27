@@ -1264,21 +1264,50 @@ def resolve_via_instagrapi(url: str):
                 return []
                 
         # Get media info
-        media_pk = cl.media_pk_from_url(f"https://www.instagram.com/reel/{shortcode}/")
-        media_info = cl.media_info(media_pk)
+        is_story = False
+        story_id = ""
         
-        if media_info.media_type == 2: # Video
-            return [(str(media_info.video_url), "VIDEO")]
-        elif media_info.media_type == 1: # Image
-            return [(str(media_info.thumbnail_url or media_info.resources[0].thumbnail_url), "IMAGE")]
-        elif media_info.media_type == 8: # Carousel
-            urls = []
-            for item in media_info.resources:
-                if item.media_type == 2:
-                    urls.append((str(item.video_url), "VIDEO"))
+        if "/stories/" in url:
+            is_story = True
+            story_id = shortcode
+            if not story_id.isdigit():
+                match_digits = re.findall(r'/stories/[^/]+/(\d+)', url)
+                if match_digits:
+                    story_id = match_digits[0]
+                    
+        elif "story_media_id=" in url:
+            is_story = True
+            match_media = re.search(r'story_media_id=(\d+)', url)
+            if match_media:
+                story_id = match_media.group(1)
+                
+        if is_story:
+            if story_id and story_id.isdigit():
+                logger.info(f"instagrapi: Fetching story/highlight info for ID {story_id}")
+                story_info = cl.story_info(int(story_id))
+                if story_info.video_url:
+                    return [(str(story_info.video_url), "VIDEO")]
                 else:
-                    urls.append((str(item.thumbnail_url or item.video_url), "IMAGE"))
-            return urls
+                    return [(str(story_info.thumbnail_url), "IMAGE")]
+            else:
+                logger.error(f"instagrapi: Could not resolve numeric story/highlight ID from URL: {url}")
+                return []
+        else:
+            media_pk = cl.media_pk_from_url(f"https://www.instagram.com/reel/{shortcode}/")
+            media_info = cl.media_info(media_pk)
+            
+            if media_info.media_type == 2: # Video
+                return [(str(media_info.video_url), "VIDEO")]
+            elif media_info.media_type == 1: # Image
+                return [(str(media_info.thumbnail_url or media_info.resources[0].thumbnail_url), "IMAGE")]
+            elif media_info.media_type == 8: # Carousel
+                urls = []
+                for item in media_info.resources:
+                    if item.media_type == 2:
+                        urls.append((str(item.video_url), "VIDEO"))
+                    else:
+                        urls.append((str(item.thumbnail_url or item.video_url), "IMAGE"))
+                return urls
     except Exception as e:
         logger.error(f"instagrapi fallback failed for shortcode {shortcode}: {e}")
         
