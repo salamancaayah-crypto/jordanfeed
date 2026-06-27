@@ -661,7 +661,7 @@ def forward_tracked_post(chat_id, username, shortcode, title=""):
     # Try to resolve via proxy
     carousel_urls = []
     try:
-        carousel_urls = resolve_via_proxy(post_url, "vxinstagram.com")
+        carousel_urls = resolve_via_proxy(post_url, "www.vxinstagram.com")
         if not carousel_urls:
             logger.info("vxinstagram failed. Trying fallback to adamlikes.men...")
             carousel_urls = resolve_via_proxy(post_url, "adamlikes.men")
@@ -1132,7 +1132,7 @@ def extract_shortcode(url: str) -> str:
             return last
     return ""
 
-def resolve_via_proxy(url: str, domain: str = "vxinstagram.com"):
+def resolve_via_proxy(url: str, domain: str = "www.vxinstagram.com"):
     """Resolves any public Instagram Reel or Post URL to its direct CDN media URLs and types using a proxy domain."""
     shortcode = extract_shortcode(url)
     if not shortcode:
@@ -1302,7 +1302,7 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
                         # 1. Try to resolve the URL using the proxy if it is a public instagram.com URL
                         if "instagram.com" in media_url:
                             try:
-                                carousel_urls = resolve_via_proxy(media_url, "vxinstagram.com")
+                                carousel_urls = resolve_via_proxy(media_url, "www.vxinstagram.com")
                                 if not carousel_urls:
                                     logger.info("vxinstagram failed to resolve media. Trying fallback to adamlikes.men...")
                                     carousel_urls = resolve_via_proxy(media_url, "adamlikes.men")
