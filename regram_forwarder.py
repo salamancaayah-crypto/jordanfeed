@@ -988,6 +988,28 @@ def download_and_forward_media(
             else:
                 bot.send_photo(telegram_chat_id, media_file, caption=caption, parse_mode="HTML")
                 
+        # Send as uncompressed document to preserve quality
+        try:
+            doc_filename = ""
+            if creator_username:
+                doc_filename = f"{creator_username}"
+                if shortcode:
+                    doc_filename += f"_{shortcode}"
+            else:
+                if shortcode:
+                    doc_filename = f"{shortcode}"
+            
+            if not doc_filename:
+                doc_filename = "media"
+                
+            doc_filename += ".mp4" if is_video else ".jpg"
+            
+            with open(temp_filename, "rb") as document_file:
+                bot.send_document(telegram_chat_id, (doc_filename, document_file), caption=f"📄 {doc_filename}")
+            logger.info("Media sent as uncompressed document successfully.")
+        except Exception as doc_e:
+            logger.error(f"Failed to send media as document: {doc_e}")
+                
         logger.info(f"Media forwarded successfully to Telegram.")
         
     except Exception as e:
