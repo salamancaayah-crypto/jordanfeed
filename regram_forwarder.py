@@ -665,9 +665,6 @@ def forward_tracked_post(chat_id, username, shortcode, title=""):
         if not carousel_urls:
             logger.info("vxinstagram failed. Trying fallback to adamlikes.men...")
             carousel_urls = resolve_via_proxy(post_url, "adamlikes.men")
-        if not carousel_urls:
-            logger.info("adamlikes.men failed. Trying fallback to instagram7.com...")
-            carousel_urls = resolve_via_proxy(post_url, "instagram7.com")
     except Exception as e:
         logger.error(f"Error resolving tracked post {shortcode} via proxies: {e}")
 
@@ -1309,9 +1306,6 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
                                 if not carousel_urls:
                                     logger.info("vxinstagram failed to resolve media. Trying fallback to adamlikes.men...")
                                     carousel_urls = resolve_via_proxy(media_url, "adamlikes.men")
-                                if not carousel_urls:
-                                    logger.info("adamlikes.men failed to resolve media. Trying fallback to instagram7.com...")
-                                    carousel_urls = resolve_via_proxy(media_url, "instagram7.com")
                             except Exception as e:
                                 logger.error(f"Error resolving instagram.com URL via proxy: {e}")
                         
