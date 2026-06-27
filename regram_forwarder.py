@@ -1008,7 +1008,8 @@ def download_and_forward_media(
                 bot.send_document(
                     telegram_chat_id, 
                     (doc_filename, document_file, 'application/octet-stream'), 
-                    caption=f"📄 {doc_filename}"
+                    caption=f"📄 {doc_filename}",
+                    disable_content_type_detection=True
                 )
             logger.info("Media sent as uncompressed document successfully.")
         except Exception as doc_e:
