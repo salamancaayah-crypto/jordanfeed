@@ -1274,33 +1274,60 @@ def resolve_via_instagrapi(url: str):
             if match_media:
                 story_id = match_media.group(1)
                 
-        if is_story:
-            if story_id and story_id.isdigit():
-                logger.info(f"instagrapi: Fetching story/highlight info for ID {story_id}")
-                story_info = cl.story_info(int(story_id))
-                if story_info.video_url:
-                    return [(str(story_info.video_url), "VIDEO")]
-                else:
-                    return [(str(story_info.thumbnail_url), "IMAGE")]
-            else:
-                logger.error(f"instagrapi: Could not resolve numeric story/highlight ID from URL: {url}")
-                return []
-        else:
-            media_pk = cl.media_pk_from_url(f"https://www.instagram.com/reel/{shortcode}/")
-            media_info = cl.media_info(media_pk)
-            
-            if media_info.media_type == 2: # Video
-                return [(str(media_info.video_url), "VIDEO")]
-            elif media_info.media_type == 1: # Image
-                return [(str(media_info.thumbnail_url or media_info.resources[0].thumbnail_url), "IMAGE")]
-            elif media_info.media_type == 8: # Carousel
-                urls = []
-                for item in media_info.resources:
-                    if item.media_type == 2:
-                        urls.append((str(item.video_url), "VIDEO"))
+        # Inline helper to perform the actual query
+        def fetch_media_data():
+            if is_story:
+                if story_id and story_id.isdigit():
+                    logger.info(f"instagrapi: Fetching story/highlight info for ID {story_id}")
+                    story_info = cl.story_info(int(story_id))
+                    if story_info.video_url:
+                        return [(str(story_info.video_url), "VIDEO")]
                     else:
-                        urls.append((str(item.thumbnail_url or item.video_url), "IMAGE"))
-                return urls
+                        return [(str(story_info.thumbnail_url), "IMAGE")]
+                else:
+                    logger.error(f"instagrapi: Could not resolve numeric story/highlight ID from URL: {url}")
+                    return []
+            else:
+                media_pk = cl.media_pk_from_url(f"https://www.instagram.com/reel/{shortcode}/")
+                media_info = cl.media_info(media_pk)
+                
+                if media_info.media_type == 2: # Video
+                    return [(str(media_info.video_url), "VIDEO")]
+                elif media_info.media_type == 1: # Image
+                    return [(str(media_info.thumbnail_url or media_info.resources[0].thumbnail_url), "IMAGE")]
+                elif media_info.media_type == 8: # Carousel
+                    urls = []
+                    for item in media_info.resources:
+                        if item.media_type == 2:
+                            urls.append((str(item.video_url), "VIDEO"))
+                        else:
+                            urls.append((str(item.thumbnail_url or item.video_url), "IMAGE"))
+                    return urls
+            return []
+
+        try:
+            return fetch_media_data()
+        except Exception as fetch_err:
+            err_str = str(fetch_err).lower()
+            if "login" in err_str or "session" in err_str or "challenge" in err_str or "checkpoint" in err_str or "feedback_required" in err_str:
+                logger.info("instagrapi: Fetch failed due to session/login issue. Attempting auto-relogin...")
+                user = os.getenv("INSTA_USER")
+                password = os.getenv("INSTA_PASS")
+                if user and password:
+                    cl.login(user, password)
+                    try:
+                        session_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "insta_session.json")
+                        cl.dump_settings(session_path)
+                        logger.info(f"instagrapi: Re-login successful and session updated in {session_path}")
+                    except Exception as dump_err:
+                        logger.warning(f"instagrapi: Re-login successful, but could not dump session: {dump_err}")
+                    return fetch_media_data()
+                else:
+                    logger.error("instagrapi: Auto-relogin failed because INSTA_USER/INSTA_PASS are not configured.")
+                    raise fetch_err
+            else:
+                raise fetch_err
+                
     except Exception as e:
         logger.error(f"instagrapi fallback failed for shortcode {shortcode}: {e}")
         
