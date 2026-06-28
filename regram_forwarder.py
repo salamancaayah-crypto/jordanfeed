@@ -1333,9 +1333,67 @@ def resolve_via_instagrapi(url: str):
         
     return []
 
+
+def resolve_via_ytdlp(url: str):
+    """Resolves Instagram URL using yt-dlp - no login, no session, no account needed."""
+    try:
+        import yt_dlp
+        
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,  # We only want the URL, not the file
+            'format': 'best',
+            'no_check_certificates': True,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            if not info:
+                return []
+            
+            # Handle playlist/carousel
+            if 'entries' in info:
+                urls = []
+                for entry in info['entries']:
+                    if entry and entry.get('url'):
+                        ext = entry.get('ext', 'mp4')
+                        media_type = "VIDEO" if ext in ('mp4', 'webm', 'mkv') else "IMAGE"
+                        urls.append((entry['url'], media_type))
+                return urls
+            
+            # Single media
+            video_url = info.get('url')
+            if not video_url:
+                # Try formats list
+                formats = info.get('formats', [])
+                if formats:
+                    best = formats[-1]  # Last is usually best quality
+                    video_url = best.get('url')
+            
+            if video_url:
+                ext = info.get('ext', 'mp4')
+                media_type = "VIDEO" if ext in ('mp4', 'webm', 'mkv') else "IMAGE"
+                return [(video_url, media_type)]
+                
+    except Exception as e:
+        logger.error(f"yt-dlp failed for URL {url}: {e}")
+    
+    return []
+
 def resolve_instagram_media(url: str):
-    """Resolves Instagram URL to media URLs using proxy list first, and falls back to instagrapi."""
-    # 1. Try www.vxinstagram.com
+    """Resolves Instagram URL to media URLs using yt-dlp first (no account needed), then proxies, then instagrapi."""
+    # 1. Try yt-dlp FIRST - no login, no session, no account needed (like the big bots do)
+    try:
+        urls = resolve_via_ytdlp(url)
+        if urls:
+            logger.info("Resolved successfully via yt-dlp (no account needed)")
+            return urls
+    except Exception as e:
+        logger.error(f"yt-dlp failed: {e}")
+
+    # 2. Try www.vxinstagram.com
     try:
         urls = resolve_via_proxy(url, "www.vxinstagram.com")
         if urls:
@@ -1344,7 +1402,7 @@ def resolve_instagram_media(url: str):
     except Exception as e:
         logger.error(f"www.vxinstagram.com failed: {e}")
         
-    # 2. Try adamlikes.men
+    # 3. Try adamlikes.men
     try:
         urls = resolve_via_proxy(url, "adamlikes.men")
         if urls:
@@ -1353,8 +1411,8 @@ def resolve_instagram_media(url: str):
     except Exception as e:
         logger.error(f"adamlikes.men failed: {e}")
         
-    # 3. Fallback to instagrapi (private API with saved session)
-    logger.info("Proxies failed. Attempting fallback to instagrapi...")
+    # 4. Last resort: instagrapi (private API with saved session)
+    logger.info("All public methods failed. Attempting fallback to instagrapi...")
     try:
         urls = resolve_via_instagrapi(url)
         if urls:

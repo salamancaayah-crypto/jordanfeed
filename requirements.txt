@@ -5,3 +5,4 @@ requests>=2.33.0
 python-multipart==0.0.9
 psycopg2-binary==2.9.12
 instagrapi==2.4.4
+yt-dlp
