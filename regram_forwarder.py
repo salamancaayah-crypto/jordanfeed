@@ -1238,20 +1238,12 @@ def resolve_via_instagrapi(url: str):
                 except Exception as e:
                     logger.error(f"Failed to load settings from file: {e}")
                     
-        # Validate session login status
-        logged_in = False
-        if session_loaded:
-            try:
-                cl.get_timeline_feed()
-                logged_in = True
-                logger.info("instagrapi: Session is valid.")
-            except Exception:
-                logger.info("instagrapi: Session is invalid. Attempting login...")
-                
-        if not logged_in:
+        # Check login status locally and perform login with credentials only if session not loaded
+        if not session_loaded or not cl.user_id:
             user = os.getenv("INSTA_USER")
             password = os.getenv("INSTA_PASS")
             if user and password:
+                logger.info("instagrapi: Session not loaded or user_id missing. Attempting login with credentials...")
                 cl.login(user, password)
                 try:
                     session_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "insta_session.json")
@@ -1260,8 +1252,9 @@ def resolve_via_instagrapi(url: str):
                 except Exception as dump_err:
                     logger.warning(f"instagrapi: Login successful, but could not dump session to file: {dump_err}")
             else:
-                logger.error("instagrapi: INSTA_USER or INSTA_PASS not set in environment.")
-                return []
+                logger.error("instagrapi: Session not loaded and INSTA_USER/INSTA_PASS not set in environment.")
+                if not session_loaded:
+                    return []
                 
         # Get media info
         is_story = False
