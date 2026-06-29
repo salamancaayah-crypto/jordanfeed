@@ -1430,6 +1430,10 @@ def _ytdlp_extract(url: str, cookie_file=None):
         'format': 'best',
         'no_check_certificates': True,
         'socket_timeout': 10,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
     }
     
     if cookie_file:
