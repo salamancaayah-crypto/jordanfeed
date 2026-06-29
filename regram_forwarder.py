@@ -1349,7 +1349,7 @@ def resolve_via_instagrapi(url: str):
                     return []
             else:
                 media_pk = _shortcode_to_media_pk(shortcode)  # Local conversion - NO API call needed
-                media_info = cl.media_info(media_pk)
+                media_info = cl.media_info_v1(media_pk)
                 
                 if media_info.media_type == 2: # Video
                     return [(str(media_info.video_url), "VIDEO")]
@@ -1678,7 +1678,12 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
                             if carousel_urls:
                                 url_to_use, type_to_use = carousel_urls[0]
                             else:
-                                url_to_use, type_to_use = media_url, att_type
+                                logger.error(f"Failed to resolve media for {media_url}. Sending failure notification to user.")
+                                send_instagram_dm(
+                                    sender_igsid, 
+                                    "❌ عذراً، لم أتمكن من تنزيل هذا المقطع.\nقد يكون حساباً خاصاً (Private)، أو السيرفر محظور حالياً من قبل إنستغرام."
+                                )
+                                return {"status": "success"}
                                 
                             logger.info(f"Forwarding single shared media of type {type_to_use} from IGSID {sender_igsid} to Telegram Chat {telegram_chat_id}")
                             background_tasks.add_task(
