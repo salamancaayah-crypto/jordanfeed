@@ -1532,6 +1532,10 @@ def resolve_instagram_media(url: str):
         logger.error(f"adamlikes.men failed: {e}")
         
     # 4. Last resort: instagrapi (private API with saved session)
+    if os.getenv("DISABLE_INSTAGRAPI", "false").lower() == "true":
+        logger.info("instagrapi fallback is disabled via DISABLE_INSTAGRAPI env var.")
+        return []
+        
     logger.info("All public methods failed. Attempting fallback to instagrapi...")
     try:
         urls = resolve_via_instagrapi(url)
