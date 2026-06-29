@@ -1356,65 +1356,82 @@ def _build_ytdlp_cookies_from_session():
         logger.error(f"Failed to build cookies file from INSTA_SESSION: {e}")
         return None
 
-def resolve_via_ytdlp(url: str):
-    """Resolves Instagram URL using yt-dlp with session cookies - no direct login needed."""
-    try:
-        import yt_dlp
+def _ytdlp_extract(url: str, cookie_file=None):
+    """Internal helper: runs yt-dlp extraction with optional cookies."""
+    import yt_dlp
+    
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'skip_download': True,
+        'format': 'best',
+        'no_check_certificates': True,
+        'socket_timeout': 10,
+    }
+    
+    if cookie_file:
+        ydl_opts['cookiefile'] = cookie_file
+    
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
         
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'skip_download': True,
-            'format': 'best',
-            'no_check_certificates': True,
-            'socket_timeout': 10,
-        }
+        if not info:
+            return []
         
-        # Try to use cookies from INSTA_SESSION for authentication
-        cookie_file = _build_ytdlp_cookies_from_session()
-        if cookie_file:
-            ydl_opts['cookiefile'] = cookie_file
-            logger.info("yt-dlp: Using cookies from INSTA_SESSION")
-        
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                
-                if not info:
-                    return []
-                
-                # Handle playlist/carousel
-                if 'entries' in info:
-                    urls = []
-                    for entry in info['entries']:
-                        if entry and entry.get('url'):
-                            ext = entry.get('ext', 'mp4')
-                            media_type = "VIDEO" if ext in ('mp4', 'webm', 'mkv') else "IMAGE"
-                            urls.append((entry['url'], media_type))
-                    return urls
-                
-                # Single media
-                video_url = info.get('url')
-                if not video_url:
-                    formats = info.get('formats', [])
-                    if formats:
-                        best = formats[-1]
-                        video_url = best.get('url')
-                
-                if video_url:
-                    ext = info.get('ext', 'mp4')
+        # Handle playlist/carousel
+        if 'entries' in info:
+            urls = []
+            for entry in info['entries']:
+                if entry and entry.get('url'):
+                    ext = entry.get('ext', 'mp4')
                     media_type = "VIDEO" if ext in ('mp4', 'webm', 'mkv') else "IMAGE"
-                    return [(video_url, media_type)]
-        finally:
-            # Clean up temp cookie file
-            if cookie_file:
-                try:
-                    os.unlink(cookie_file)
-                except Exception:
-                    pass
-                
+                    urls.append((entry['url'], media_type))
+            return urls
+        
+        # Single media
+        video_url = info.get('url')
+        if not video_url:
+            formats = info.get('formats', [])
+            if formats:
+                best = formats[-1]
+                video_url = best.get('url')
+        
+        if video_url:
+            ext = info.get('ext', 'mp4')
+            media_type = "VIDEO" if ext in ('mp4', 'webm', 'mkv') else "IMAGE"
+            return [(video_url, media_type)]
+    
+    return []
+
+def resolve_via_ytdlp(url: str):
+    """Resolves Instagram URL using yt-dlp. Tries WITHOUT cookies first (for public content), then WITH cookies."""
+    
+    # Step 1: Try WITHOUT cookies first (public content - no account needed at all)
+    try:
+        logger.info("yt-dlp: Trying WITHOUT cookies (anonymous/public)...")
+        result = _ytdlp_extract(url)
+        if result:
+            logger.info("yt-dlp: Success WITHOUT cookies (no account needed)")
+            return result
     except Exception as e:
-        logger.error(f"yt-dlp failed for URL {url}: {e}")
+        logger.info(f"yt-dlp without cookies failed: {e}")
+    
+    # Step 2: Try WITH cookies from INSTA_SESSION (for login-walled content)
+    cookie_file = _build_ytdlp_cookies_from_session()
+    if cookie_file:
+        try:
+            logger.info("yt-dlp: Trying WITH cookies from INSTA_SESSION...")
+            result = _ytdlp_extract(url, cookie_file)
+            if result:
+                logger.info("yt-dlp: Success WITH cookies")
+                return result
+        except Exception as e:
+            logger.info(f"yt-dlp with cookies failed: {e}")
+        finally:
+            try:
+                os.unlink(cookie_file)
+            except Exception:
+                pass
     
     return []
 
