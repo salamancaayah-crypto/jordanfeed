@@ -833,9 +833,7 @@ async def lifespan(app: FastAPI):
         tg_thread = threading.Thread(target=run_telegram_polling, daemon=True)
         tg_thread.start()
         
-        # Start Instagram Auto-tracking background thread
-        track_thread = threading.Thread(target=run_auto_track_loop, daemon=True)
-        track_thread.start()
+
     else:
         logger.error("TELEGRAM_TOKEN is missing! Cannot start Telegram polling or tracking.")
     yield
