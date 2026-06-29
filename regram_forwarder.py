@@ -44,6 +44,17 @@ load_env()
 LAST_CAPTIONS_CACHE = {}
 LAST_CAPTIONS_CACHE_LOCK = threading.Lock()
 
+# --- Session Protection: Rate limiter, circuit breaker, and deduplication ---
+INSTAGRAPI_LAST_CALL_TIME = 0
+INSTAGRAPI_LAST_CALL_LOCK = threading.Lock()
+INSTAGRAPI_MIN_DELAY = 3  # Minimum seconds between instagrapi calls
+INSTAGRAPI_FAIL_COUNT = 0
+INSTAGRAPI_CIRCUIT_OPEN_UNTIL = 0  # Unix timestamp when circuit breaker resets
+INSTAGRAPI_MAX_FAILS = 5  # After this many consecutive fails, pause for cooldown
+INSTAGRAPI_COOLDOWN = 300  # 5 minutes cooldown after too many failures
+PROCESSED_MIDS = {}  # Deduplication cache: message_id -> timestamp
+PROCESSED_MIDS_LOCK = threading.Lock()
+
 # Config parameters
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 META_VERIFY_TOKEN = os.environ.get("META_VERIFY_TOKEN", "my_secret_verify_token")
@@ -1201,8 +1212,59 @@ def resolve_via_proxy(url: str, domain: str = "www.vxinstagram.com"):
             
     return urls
 
+def _shortcode_to_media_pk(shortcode: str) -> int:
+    """Converts Instagram shortcode to media_pk locally WITHOUT any API call.
+    This eliminates the 3 failed GraphQL requests that cause rate limiting."""
+    CHARSET = string.ascii_uppercase + string.ascii_lowercase + string.digits + '-_'
+    media_pk = 0
+    for char in shortcode:
+        if char in CHARSET:
+            media_pk = media_pk * 64 + CHARSET.index(char)
+    return media_pk
+
+def _instagrapi_rate_limit():
+    """Enforces minimum delay between instagrapi calls and checks circuit breaker.
+    Returns True if OK to proceed, False if should skip."""
+    global INSTAGRAPI_LAST_CALL_TIME, INSTAGRAPI_FAIL_COUNT, INSTAGRAPI_CIRCUIT_OPEN_UNTIL
+    
+    now = time.time()
+    
+    # Check circuit breaker
+    if INSTAGRAPI_CIRCUIT_OPEN_UNTIL > now:
+        remaining = int(INSTAGRAPI_CIRCUIT_OPEN_UNTIL - now)
+        logger.warning(f"instagrapi: Circuit breaker OPEN. Skipping call. Resets in {remaining}s.")
+        return False
+    
+    # Enforce minimum delay
+    with INSTAGRAPI_LAST_CALL_LOCK:
+        elapsed = now - INSTAGRAPI_LAST_CALL_TIME
+        if elapsed < INSTAGRAPI_MIN_DELAY:
+            wait_time = INSTAGRAPI_MIN_DELAY - elapsed
+            logger.info(f"instagrapi: Rate limiting - waiting {wait_time:.1f}s...")
+            time.sleep(wait_time)
+        INSTAGRAPI_LAST_CALL_TIME = time.time()
+    
+    return True
+
+def _instagrapi_record_success():
+    """Records a successful instagrapi call, resetting fail counter."""
+    global INSTAGRAPI_FAIL_COUNT
+    INSTAGRAPI_FAIL_COUNT = 0
+
+def _instagrapi_record_failure():
+    """Records a failed instagrapi call. Opens circuit breaker after too many failures."""
+    global INSTAGRAPI_FAIL_COUNT, INSTAGRAPI_CIRCUIT_OPEN_UNTIL
+    INSTAGRAPI_FAIL_COUNT += 1
+    if INSTAGRAPI_FAIL_COUNT >= INSTAGRAPI_MAX_FAILS:
+        INSTAGRAPI_CIRCUIT_OPEN_UNTIL = time.time() + INSTAGRAPI_COOLDOWN
+        logger.warning(f"instagrapi: Too many failures ({INSTAGRAPI_FAIL_COUNT}). Circuit breaker OPEN for {INSTAGRAPI_COOLDOWN}s to protect session.")
+        INSTAGRAPI_FAIL_COUNT = 0
+
 def resolve_via_instagrapi(url: str):
     """Resolves Instagram URL using instagrapi with session fallback."""
+    if not _instagrapi_rate_limit():
+        return []
+    
     shortcode = extract_shortcode(url)
     if not shortcode:
         return []
@@ -1288,7 +1350,7 @@ def resolve_via_instagrapi(url: str):
                     logger.error(f"instagrapi: Could not resolve numeric story/highlight ID from URL: {url}")
                     return []
             else:
-                media_pk = cl.media_pk_from_url(f"https://www.instagram.com/reel/{shortcode}/")
+                media_pk = _shortcode_to_media_pk(shortcode)  # Local conversion - NO API call needed
                 media_info = cl.media_info(media_pk)
                 
                 if media_info.media_type == 2: # Video
@@ -1306,8 +1368,11 @@ def resolve_via_instagrapi(url: str):
             return []
 
         try:
-            return fetch_media_data()
+            result = fetch_media_data()
+            _instagrapi_record_success()
+            return result
         except Exception as fetch_err:
+            _instagrapi_record_failure()
             err_str = str(fetch_err).lower()
             if "login" in err_str or "session" in err_str or "challenge" in err_str or "checkpoint" in err_str or "feedback_required" in err_str:
                 logger.info("instagrapi: Fetch failed due to session/login issue. Attempting auto-relogin...")
@@ -1498,6 +1563,21 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
             if not sender_igsid or not message:
                 continue
                 
+            # Deduplicate webhook messages (Meta sometimes sends duplicates)
+            mid = message.get("mid", "")
+            if mid:
+                with PROCESSED_MIDS_LOCK:
+                    now = time.time()
+                    # Clean old entries (older than 2 minutes)
+                    expired = [k for k, v in PROCESSED_MIDS.items() if now - v > 120]
+                    for k in expired:
+                        del PROCESSED_MIDS[k]
+                    # Check if already processed
+                    if mid in PROCESSED_MIDS:
+                        logger.info(f"Skipping duplicate webhook message mid={mid[:20]}...")
+                        continue
+                    PROCESSED_MIDS[mid] = now
+            
             message_text = message.get("text", "").strip()
             attachments = message.get("attachments", [])
             
