@@ -11,8 +11,12 @@ import re
 from fastapi import FastAPI, Request, Query, HTTPException, BackgroundTasks
 from fastapi.responses import PlainTextResponse
 import telebot
-import psycopg2
-from psycopg2 import pool
+try:
+    import psycopg2
+    from psycopg2 import pool
+    HAS_POSTGRES = True
+except ImportError:
+    HAS_POSTGRES = False
 
 
 # Configure logging
@@ -79,6 +83,9 @@ IS_POSTGRES = DATABASE_URL is not None and DATABASE_URL.strip() != ""
 PLACEHOLDER = "%s" if IS_POSTGRES else "?"
 
 if IS_POSTGRES:
+    if not HAS_POSTGRES:
+        logger.critical("PostgreSQL is requested (DATABASE_URL is set), but psycopg2 library is not installed.")
+        raise ImportError("No module named 'psycopg2' but DATABASE_URL is set.")
     try:
         connection_pool = pool.SimpleConnectionPool(
             1, 5,
