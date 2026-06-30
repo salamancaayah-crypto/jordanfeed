@@ -46,6 +46,46 @@ def extract_shortcode(url):
         return match.group(1)
     return None
 
+def resolve_via_ytdlp_local(url):
+    """Runs yt-dlp locally to extract the direct media URL."""
+    try:
+        import yt_dlp
+        print(f"📥 Running local yt-dlp extraction for: {url}")
+        
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+            'format': 'best',
+            'no_check_certificates': True,
+            'socket_timeout': 12,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if not info:
+                return None
+                
+            # Handle playlist/carousel
+            if 'entries' in info:
+                urls = []
+                for entry in info['entries']:
+                    if entry and entry.get('url'):
+                        urls.append(entry['url'])
+                if urls:
+                    return urls[0]
+                    
+            video_url = info.get('url')
+            if not video_url:
+                formats = info.get('formats', [])
+                if formats:
+                    best = formats[-1]
+                    video_url = best.get('url')
+            return video_url
+    except Exception as e:
+        print(f"❌ Local yt-dlp extraction failed: {e}")
+        return None
+
 def resolve_via_html_proxies(instagram_url):
     """Attempts to resolve the video using free OG embed proxies without keys."""
     shortcode = extract_shortcode(instagram_url)
@@ -54,9 +94,9 @@ def resolve_via_html_proxies(instagram_url):
         
     # Standard OG embed proxy list
     proxies = [
+        f"https://www.vxinstagram.com/reel/{shortcode}/",
         f"https://ddinstagram.com/reel/{shortcode}/",
         f"https://fixinstagram.com/reel/{shortcode}/",
-        f"https://www.vxinstagram.com/reel/{shortcode}/",
         f"https://ddinstagram.com/p/{shortcode}/",
         f"https://fixinstagram.com/p/{shortcode}/",
     ]
@@ -146,10 +186,14 @@ def handle_message(message):
         
         bot.reply_to(message, "⏳ جاري التحميل والتحويل...")
         
-        # 1. Try free HTML proxies first
-        media_url = resolve_via_html_proxies(instagram_url)
+        # 1. Try local yt-dlp first (clean home IP, no keys needed)
+        media_url = resolve_via_ytdlp_local(instagram_url)
         
-        # 2. Fallback to RapidAPI if proxies fail
+        # 2. Try free HTML proxies second
+        if not media_url:
+            media_url = resolve_via_html_proxies(instagram_url)
+        
+        # 3. Fallback to RapidAPI if both fail
         if not media_url and RAPIDAPI_KEY:
             media_url = resolve_instagram_via_api(instagram_url)
             
