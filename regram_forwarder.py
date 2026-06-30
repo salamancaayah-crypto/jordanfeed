@@ -410,6 +410,70 @@ def fetch_rss_feed(username):
     logger.error(f"All RSS-Bridge instances failed to fetch feed for user '{cleaned_username}'.")
     return None
 
+@bot.message_handler(commands=['session'])
+def handle_set_session(message):
+    if not is_allowed_user(message):
+        return
+        
+    # Extract the JSON text
+    text = message.text.replace("/session", "").strip()
+    if not text:
+        bot.reply_to(
+            message, 
+            "💡 يرجى إرسال الكود بعد الأمر، مثال:\n`/session {\"cookies\": ...}`", 
+            parse_mode="Markdown"
+        )
+        return
+        
+    try:
+        # Validate JSON
+        import json
+        data = json.loads(text)
+        if "cookies" not in data:
+            bot.reply_to(message, "❌ خطأ: يجب أن يحتوي النص على مفتاح 'cookies'.")
+            return
+            
+        # Update in-memory env var for immediate effect
+        os.environ["INSTA_SESSION"] = json.dumps(data)
+        
+        # Save to insta_session.json
+        session_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "insta_session.json")
+        with open(session_path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+            
+        # Update .env file permanently
+        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            
+            # Find and replace INSTA_SESSION, or append if not exists
+            updated = False
+            new_lines = []
+            for line in lines:
+                if line.strip().startswith("INSTA_SESSION="):
+                    new_lines.append(f'INSTA_SESSION=\'{json.dumps(data)}\'\n')
+                    updated = True
+                else:
+                    new_lines.append(line)
+            if not updated:
+                new_lines.append(f'\nINSTA_SESSION=\'{json.dumps(data)}\'\n')
+                
+            with open(env_path, "w", encoding="utf-8") as f:
+                f.writelines(new_lines)
+                
+        bot.reply_to(
+            message, 
+            "✅ تم حفظ الجلسة وتحديثها بنجاح! تم تطبيق الإعدادات الجديدة فوراً دون الحاجة لإعادة تشغيل البوت."
+        )
+        logger.info("Instagram session updated via Telegram /session command.")
+    except Exception as e:
+        bot.reply_to(
+            message, 
+            f"❌ فشل حفظ الجلسة. تأكد من أن النص بتنسيق JSON صحيح. الخطأ:\n`{e}`", 
+            parse_mode="Markdown"
+        )
+
 @bot.message_handler(commands=['start'])
 def handle_start(message):
     if not is_allowed_user(message):
