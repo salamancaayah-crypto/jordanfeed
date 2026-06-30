@@ -1349,7 +1349,7 @@ def resolve_via_instagrapi(url: str):
                     return []
             else:
                 media_pk = _shortcode_to_media_pk(shortcode)  # Local conversion - NO API call needed
-                media_info = cl.media_info_v1(media_pk)
+                media_info = cl.media_info(media_pk)
                 
                 if media_info.media_type == 2: # Video
                     return [(str(media_info.video_url), "VIDEO")]
@@ -1430,10 +1430,6 @@ def _ytdlp_extract(url: str, cookie_file=None):
         'format': 'best',
         'no_check_certificates': True,
         'socket_timeout': 10,
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
-        }
     }
     
     if cookie_file:
@@ -1532,10 +1528,6 @@ def resolve_instagram_media(url: str):
         logger.error(f"adamlikes.men failed: {e}")
         
     # 4. Last resort: instagrapi (private API with saved session)
-    if os.getenv("DISABLE_INSTAGRAPI", "false").lower() == "true":
-        logger.info("instagrapi fallback is disabled via DISABLE_INSTAGRAPI env var.")
-        return []
-        
     logger.info("All public methods failed. Attempting fallback to instagrapi...")
     try:
         urls = resolve_via_instagrapi(url)
@@ -1686,12 +1678,7 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
                             if carousel_urls:
                                 url_to_use, type_to_use = carousel_urls[0]
                             else:
-                                logger.error(f"Failed to resolve media for {media_url}. Sending failure notification to user.")
-                                send_instagram_dm(
-                                    sender_igsid, 
-                                    "❌ عذراً، لم أتمكن من تنزيل هذا المقطع.\nقد يكون حساباً خاصاً (Private)، أو السيرفر محظور حالياً من قبل إنستغرام."
-                                )
-                                return {"status": "success"}
+                                url_to_use, type_to_use = media_url, att_type
                                 
                             logger.info(f"Forwarding single shared media of type {type_to_use} from IGSID {sender_igsid} to Telegram Chat {telegram_chat_id}")
                             background_tasks.add_task(
