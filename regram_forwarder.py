@@ -432,23 +432,36 @@ def handle_set_session(message):
     if not is_allowed_user(message):
         return
         
-    # Extract the JSON text
+    # Extract the text
     text = message.text.replace("/session", "").strip()
     if not text:
         bot.reply_to(
             message, 
-            "💡 يرجى إرسال الكود بعد الأمر، مثال:\n`/session {\"cookies\": ...}`", 
+            "💡 يرجى إرسال الكوكيز بعد الأمر، مثال:\n`/session sessionid=xxxx; ds_user_id=yyyy`\n\nأو كود الـ JSON.", 
             parse_mode="Markdown"
         )
         return
         
     try:
-        # Validate JSON
         import json
-        data = json.loads(text)
-        if "cookies" not in data:
-            bot.reply_to(message, "❌ خطأ: يجب أن يحتوي النص على مفتاح 'cookies'.")
-            return
+        # Check if it is a JSON or a raw cookie string
+        if text.startswith("{"):
+            data = json.loads(text)
+            if "cookies" not in data:
+                bot.reply_to(message, "❌ خطأ: يجب أن يحتوي الـ JSON على مفتاح 'cookies'.")
+                return
+        else:
+            # Parse raw cookie string (e.g. sessionid=xxxx; ds_user_id=yyyy)
+            cookies = {}
+            for item in text.split(";"):
+                if "=" in item:
+                    k, v = item.strip().split("=", 1)
+                    cookies[k.strip()] = v.strip()
+            
+            if "sessionid" not in cookies:
+                bot.reply_to(message, "❌ خطأ: لم يتم العثور على 'sessionid' في الكوكيز المرسلة. تأكد من تسجيل الدخول ونسخ الكوكيز بالكامل.")
+                return
+            data = {"cookies": cookies}
             
         # Update in-memory env var for immediate effect
         os.environ["INSTA_SESSION"] = json.dumps(data)
