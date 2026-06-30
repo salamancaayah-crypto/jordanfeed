@@ -5,11 +5,21 @@ import string
 import threading
 import logging
 import requests
-import uvicorn
 import time
 import re
-from fastapi import FastAPI, Request, Query, HTTPException, BackgroundTasks
-from fastapi.responses import PlainTextResponse
+try:
+    from fastapi import FastAPI, Request, Query, HTTPException, BackgroundTasks
+    from fastapi.responses import PlainTextResponse
+    HAS_FASTAPI = True
+except ImportError:
+    HAS_FASTAPI = False
+
+try:
+    import uvicorn
+    HAS_UVICORN = True
+except ImportError:
+    HAS_UVICORN = False
+
 import telebot
 try:
     import psycopg2
@@ -897,19 +907,32 @@ def run_auto_track_loop():
 # ----------------- FastAPI Webhook Server -----------------
 from contextlib import asynccontextmanager
 
+if not HAS_FASTAPI:
+    class FastAPI: pass
+    class Request: pass
+    class Query:
+        def __init__(self, *args, **kwargs): pass
+    class PlainTextResponse: pass
+    class BackgroundTasks: pass
+    class DummyApp:
+        def get(self, *args, **kwargs): return lambda func: func
+        def post(self, *args, **kwargs): return lambda func: func
+    app = DummyApp()
+else:
+    app = None
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if TELEGRAM_TOKEN:
         # Start Telegram Polling in background thread
         tg_thread = threading.Thread(target=run_telegram_polling, daemon=True)
         tg_thread.start()
-        
-
     else:
         logger.error("TELEGRAM_TOKEN is missing! Cannot start Telegram polling or tracking.")
     yield
 
-app = FastAPI(title="Instagram Telegram Webhook Linker", lifespan=lifespan)
+if HAS_FASTAPI:
+    app = FastAPI(title="Instagram Telegram Webhook Linker", lifespan=lifespan)
 
 
 @app.get("/webhook", response_class=PlainTextResponse)
@@ -1789,6 +1812,19 @@ if __name__ == "__main__":
         logger.critical("TELEGRAM_TOKEN is missing! Please configure it in .env file.")
         exit(1)
         
-    # Start FastAPI server in main thread (startup event will trigger Telegram polling)
-    logger.info(f"Starting FastAPI Webhook Server on {HOST}:{PORT}...")
-    uvicorn.run(app, host=HOST, port=PORT)
+    # Start the auto-tracking loop in a background thread
+    track_thread = threading.Thread(target=run_auto_track_loop, daemon=True)
+    track_thread.start()
+    logger.info("Auto-track loop thread started.")
+    
+    if HAS_FASTAPI and HAS_UVICORN:
+        # Start FastAPI server in main thread (lifespan will start Telegram polling in background)
+        logger.info(f"Starting FastAPI Webhook Server on {HOST}:{PORT}...")
+        uvicorn.run(app, host=HOST, port=PORT)
+    else:
+        logger.info("FastAPI/Uvicorn not installed or not available. Running in local polling-only mode.")
+        logger.info("Starting Telegram Bot Polling in main thread...")
+        try:
+            bot.infinity_polling()
+        except KeyboardInterrupt:
+            logger.info("Bot stopped by user.")
