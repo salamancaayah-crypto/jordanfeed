@@ -192,6 +192,14 @@ def handle_message(message):
             # Clean up
             if os.path.exists(temp_file):
                 os.remove(temp_file)
+    else:
+        # Standard welcome and test response
+        if message_text.startswith("/") or message_text.lower() in ["hi", "hello", "test", "بوت", "هلا", "شغال"]:
+            bot.reply_to(
+                message, 
+                "🤖 أهلاً بك! أنا بوت تحميل إنستغرام الجديد.\n\n"
+                "أنا شغال تماماً الآن. أرسل لي أي رابط ريلز (Reel) أو منشور (Post) وسأقوم بتحميله وإرساله لك فوراً بجودة كاملة!"
+            )
 
 if __name__ == "__main__":
     try:
