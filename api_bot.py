@@ -39,10 +39,56 @@ def download_file(url, extension="mp4"):
             os.remove(temp_filename)
         return None
 
+def extract_shortcode(url):
+    pattern = r'/(?:p|reel|tv|stories/[^/]+)/([A-Za-z0-9_-]+)'
+    match = re.search(pattern, url)
+    if match:
+        return match.group(1)
+    return None
+
+def resolve_via_html_proxies(instagram_url):
+    """Attempts to resolve the video using free OG embed proxies without keys."""
+    shortcode = extract_shortcode(instagram_url)
+    if not shortcode:
+        return None
+        
+    # Standard OG embed proxy list
+    proxies = [
+        f"https://ddinstagram.com/reel/{shortcode}/",
+        f"https://fixinstagram.com/reel/{shortcode}/",
+        f"https://www.vxinstagram.com/reel/{shortcode}/",
+        f"https://ddinstagram.com/p/{shortcode}/",
+        f"https://fixinstagram.com/p/{shortcode}/",
+    ]
+    
+    headers = {
+        "User-Agent": "TelegramBot (like TwitterBot)"
+    }
+    
+    for proxy_url in proxies:
+        try:
+            print(f"🔗 Trying HTML proxy: {proxy_url}")
+            response = requests.get(proxy_url, headers=headers, timeout=8)
+            if response.status_code == 200:
+                html = response.text
+                match = re.search(r'<meta\s+property="og:video"\s+content="([^"]+)"', html)
+                if not match:
+                    match = re.search(r'content="([^"]+)"\s+property="og:video"', html)
+                if not match:
+                    match = re.search(r'<meta\s+name="twitter:player:stream"\s+content="([^"]+)"', html)
+                    
+                if match:
+                    video_url = match.group(1).replace("&amp;", "&")
+                    print(f"✅ Found direct video link via proxy: {video_url[:60]}...")
+                    return video_url
+        except Exception as e:
+            print(f"⚠️ Proxy failed: {e}")
+            
+    return None
+
 def resolve_instagram_via_api(instagram_url):
     """Calls the RapidAPI endpoint to get the direct download link."""
     if not RAPIDAPI_KEY:
-        print("❌ RapidAPI Key is missing!")
         return None
         
     headers = {
@@ -98,12 +144,17 @@ def handle_message(message):
         instagram_url = url_match.group(1)
         chat_id = message.chat.id
         
-        bot.reply_to(message, "⏳ جاري التحميل عبر الـ API...")
+        bot.reply_to(message, "⏳ جاري التحميل والتحويل...")
         
-        # 1. Resolve via RapidAPI
-        media_url = resolve_instagram_via_api(instagram_url)
+        # 1. Try free HTML proxies first
+        media_url = resolve_via_html_proxies(instagram_url)
+        
+        # 2. Fallback to RapidAPI if proxies fail
+        if not media_url and RAPIDAPI_KEY:
+            media_url = resolve_instagram_via_api(instagram_url)
+            
         if not media_url:
-            bot.send_message(chat_id, "❌ فشل استخراج رابط التحميل من الـ API. تأكد من صلاحية المفتاح والخدمة.")
+            bot.send_message(chat_id, "❌ عذراً، فشل استخراج رابط التحميل.")
             return
             
         # Determine extension (rough guess)
