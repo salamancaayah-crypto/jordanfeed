@@ -504,6 +504,77 @@ def handle_set_session(message):
             parse_mode="Markdown"
         )
 
+@bot.message_handler(content_types=['document'])
+def handle_document_session(message):
+    if not is_allowed_user(message):
+        return
+        
+    # Check if caption is /session or filename indicates cookies/session
+    caption = message.caption.strip() if message.caption else ""
+    filename = message.document.file_name.lower() if message.document.file_name else ""
+    
+    is_session_file = (caption == "/session") or ("cookie" in filename) or ("session" in filename)
+    if not is_session_file:
+        return
+        
+    try:
+        # Download the file
+        file_info = bot.get_file(message.document.file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+        text = downloaded_file.decode("utf-8").strip()
+        
+        import json
+        if text.startswith("{"):
+            data = json.loads(text)
+            if "cookies" not in data:
+                bot.reply_to(message, "❌ خطأ: يجب أن يحتوي الملف على مفتاح 'cookies' (تنسيق JSON).")
+                return
+        else:
+            # Parse raw cookie string
+            cookies = {}
+            for item in text.split(";"):
+                if "=" in item:
+                    k, v = item.strip().split("=", 1)
+                    cookies[k.strip()] = v.strip()
+            
+            if "sessionid" not in cookies:
+                bot.reply_to(message, "❌ خطأ: لم يتم العثور على 'sessionid' في الملف المرسل.")
+                return
+            data = {"cookies": cookies}
+            
+        # Update in-memory env var for immediate effect
+        os.environ["INSTA_SESSION"] = json.dumps(data)
+        
+        # Save to insta_session.json
+        session_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "insta_session.json")
+        with open(session_path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+            
+        # Update .env file permanently
+        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            
+            updated = False
+            new_lines = []
+            for line in lines:
+                if line.strip().startswith("INSTA_SESSION="):
+                    new_lines.append(f'INSTA_SESSION=\'{json.dumps(data)}\'\n')
+                    updated = True
+                else:
+                    new_lines.append(line)
+            if not updated:
+                new_lines.append(f'\nINSTA_SESSION=\'{json.dumps(data)}\'\n')
+                
+            with open(env_path, "w", encoding="utf-8") as f:
+                f.writelines(new_lines)
+                
+        bot.reply_to(message, "✅ تم استلام الملف وحفظ الجلسة وتحديثها بنجاح فوراً دون الحاجة لإعادة تشغيل البوت!")
+        logger.info("Instagram session updated via Telegram document upload.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ فشل قراءة الملف وحفظ الجلسة. الخطأ:\n`{e}`")
+
 @bot.message_handler(commands=['start'])
 def handle_start(message):
     if not is_allowed_user(message):
