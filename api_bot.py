@@ -46,45 +46,95 @@ def extract_shortcode(url):
         return match.group(1)
     return None
 
-def resolve_via_ytdlp_local(url):
-    """Runs yt-dlp locally to extract the direct media URL."""
-    try:
-        import yt_dlp
-        print(f"📥 Running local yt-dlp extraction for: {url}")
-        
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'skip_download': True,
-            'format': 'best',
-            'no_check_certificates': True,
-            'socket_timeout': 12,
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            if not info:
-                return None
-                
-            # Handle playlist/carousel
-            if 'entries' in info:
-                urls = []
-                for entry in info['entries']:
-                    if entry and entry.get('url'):
-                        urls.append(entry['url'])
-                if urls:
-                    return urls[0]
-                    
-            video_url = info.get('url')
-            if not video_url:
-                formats = info.get('formats', [])
-                if formats:
-                    best = formats[-1]
-                    video_url = best.get('url')
-            return video_url
-    except Exception as e:
-        print(f"❌ Local yt-dlp extraction failed: {e}")
+def _build_ytdlp_cookies_from_session():
+    """Builds a Netscape-format cookies file from the INSTA_SESSION env var for yt-dlp."""
+    import json, tempfile
+    session_data = os.getenv("INSTA_SESSION")
+    if not session_data:
         return None
+    try:
+        settings = json.loads(session_data)
+        cookies = settings.get("cookies", {})
+        if not cookies:
+            return None
+        
+        cookie_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, prefix='ytdlp_cookies_')
+        cookie_file.write("# Netscape HTTP Cookie File\n")
+        for name, value in cookies.items():
+            cookie_file.write(f".instagram.com\tTRUE\t/\tTRUE\t0\t{name}\t{value}\n")
+        cookie_file.close()
+        return cookie_file.name
+    except Exception as e:
+        print(f"❌ Failed to build cookies file from INSTA_SESSION: {e}")
+        return None
+
+def _ytdlp_extract(url, cookie_file=None):
+    import yt_dlp
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'skip_download': True,
+        'format': 'best',
+        'no_check_certificates': True,
+        'socket_timeout': 12,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+    }
+    if cookie_file:
+        ydl_opts['cookiefile'] = cookie_file
+        
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+        if not info:
+            return None
+            
+        # Handle playlist/carousel
+        if 'entries' in info:
+            urls = []
+            for entry in info['entries']:
+                if entry and entry.get('url'):
+                    urls.append(entry['url'])
+            if urls:
+                return urls[0]
+                
+        video_url = info.get('url')
+        if not video_url:
+            formats = info.get('formats', [])
+            if formats:
+                best = formats[-1]
+                video_url = best.get('url')
+        return video_url
+
+def resolve_via_ytdlp_local(url):
+    """Runs yt-dlp locally, trying first WITHOUT cookies, then WITH cookies from INSTA_SESSION."""
+    # 1. Try WITHOUT cookies
+    print(f"📥 Running local yt-dlp extraction (Anonymous) for: {url}")
+    try:
+        res = _ytdlp_extract(url)
+        if res:
+            return res
+    except Exception as e:
+        print(f"yt-dlp anonymous failed: {e}")
+        
+    # 2. Try WITH cookies if available
+    cookie_file = _build_ytdlp_cookies_from_session()
+    if cookie_file:
+        print(f"📥 Running local yt-dlp extraction (WITH cookies) for: {url}")
+        try:
+            res = _ytdlp_extract(url, cookie_file)
+            if res:
+                return res
+        except Exception as e:
+            print(f"yt-dlp with cookies failed: {e}")
+        finally:
+            try:
+                os.unlink(cookie_file)
+            except Exception:
+                pass
+                
+    return None
 
 def resolve_via_html_proxies(instagram_url):
     """Attempts to resolve the video using free OG embed proxies without keys."""
