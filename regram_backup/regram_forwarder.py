@@ -575,6 +575,109 @@ def handle_document_session(message):
     except Exception as e:
         bot.reply_to(message, f"❌ فشل قراءة الملف وحفظ الجلسة. الخطأ:\n`{e}`")
 
+def get_profile_posts(username, limit=12):
+    """Fetches the latest post URLs from a public Instagram profile using yt-dlp."""
+    import yt_dlp
+    url = f"https://www.instagram.com/{username}/"
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': True,
+        'playlistend': limit,
+        'no_check_certificates': True,
+        'socket_timeout': 10,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+    }
+    
+    # Try with cookies if available
+    cookie_file = _build_ytdlp_cookies_from_session()
+    if cookie_file:
+        ydl_opts['cookiefile'] = cookie_file
+        
+    try:
+        logger.info(f"Extracting profile posts for @{username} via yt-dlp...")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if not info or 'entries' not in info:
+                logger.warning(f"No entries found in yt-dlp extraction for {username}.")
+                return []
+            
+            results = []
+            for entry in info['entries']:
+                if entry and entry.get('url'):
+                    results.append(entry['url'])
+            return results[:limit]
+    except Exception as e:
+        logger.error(f"Error extracting profile posts for {username}: {e}")
+        return []
+    finally:
+        if cookie_file:
+            try:
+                os.unlink(cookie_file)
+            except Exception:
+                pass
+
+@bot.message_handler(commands=['dump'])
+def handle_dump(message):
+    if not is_allowed_user(message):
+        return
+        
+    parts = message.text.split()
+    if len(parts) < 2:
+        bot.reply_to(message, "💡 يرجى كتابة اسم الحساب بعد الأمر، مثال:\n`/dump nutripediacenter`")
+        return
+        
+    username = parts[1].strip().replace("@", "")
+    chat_id = message.chat.id
+    
+    bot.reply_to(message, f"⏳ جاري بدء سحب آخر 12 منشور/ريلز من حساب @{username}... قد يستغرق هذا دقيقة أو دقيقتين.")
+    
+    def do_dump():
+        try:
+            urls = get_profile_posts(username, limit=12)
+            if not urls:
+                bot.send_message(chat_id, f"❌ لم أتمكن من العثور على أي منشورات لحساب @{username}. تأكد أن الحساب عام وليس خاصاً.")
+                return
+                
+            bot.send_message(chat_id, f"📥 تم العثور على {len(urls)} منشور. جاري التحميل والإرسال بالتتابع...")
+            
+            success_count = 0
+            for idx, post_url in enumerate(urls):
+                try:
+                    logger.info(f"Dumping post {idx+1}/{len(urls)}: {post_url}")
+                    carousel_urls = resolve_instagram_media(post_url)
+                    if carousel_urls:
+                        if len(carousel_urls) > 1:
+                            download_and_forward_carousel(
+                                carousel_urls,
+                                str(chat_id),
+                                original_caption=f"🎥 المنشور {idx+1} من حساب @{username}",
+                                shortcode=extract_shortcode(post_url)
+                            )
+                        else:
+                            url_to_use, type_to_use = carousel_urls[0]
+                            download_and_forward_media(
+                                url_to_use,
+                                type_to_use,
+                                str(chat_id),
+                                original_caption=f"🎥 المنشور {idx+1} من حساب @{username}",
+                                shortcode=extract_shortcode(post_url)
+                            )
+                        success_count += 1
+                        time.sleep(1) # Rate limit safety
+                except Exception as post_e:
+                    logger.error(f"Error dumping post {post_url}: {post_e}")
+                    
+            bot.send_message(chat_id, f"✅ اكتمل التحميل! تم إرسال {success_count} منشور من أصل {len(urls)} بنجاح من حساب @{username}.")
+        except Exception as e:
+            logger.error(f"Dump error: {e}")
+            bot.send_message(chat_id, f"❌ حدث خطأ أثناء عملية السحب لحساب @{username}: {e}")
+            
+    threading.Thread(target=do_dump, daemon=True).start()
+
 @bot.message_handler(commands=['start'])
 def handle_start(message):
     if not is_allowed_user(message):
@@ -1831,21 +1934,19 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
                         
                         carousel_urls = []
                         
-                        # 1. Try Facebook Graph API first if we have a media ID (fastest and most stable, no scraping needed)
-                        if media_id and META_ACCESS_TOKEN:
+                        # 1. Try to resolve the URL using the proxy/instagrapi fallback if it is a public instagram.com URL
+                        if "instagram.com" in media_url:
                             try:
-                                logger.info(f"Trying Graph API resolution first for media_id {media_id}...")
-                                carousel_urls = get_carousel_media_urls(media_id, META_ACCESS_TOKEN)
-                            except Exception as e:
-                                logger.error(f"Error resolving media_id {media_id} via Graph API: {e}")
-                                
-                        # 2. Fallback to public resolvers (yt-dlp/proxies) if Graph API failed or media_id is not available
-                        if not carousel_urls and "instagram.com" in media_url:
-                            try:
-                                logger.info(f"Falling back to public resolvers for URL: {media_url}")
                                 carousel_urls = resolve_instagram_media(media_url)
                             except Exception as e:
                                 logger.error(f"Error resolving instagram.com URL: {e}")
+                        
+                        # 2. Fallback to Facebook Graph API for Lookaside URLs if we have a media ID
+                        if not carousel_urls and media_id and META_ACCESS_TOKEN:
+                            try:
+                                carousel_urls = get_carousel_media_urls(media_id, META_ACCESS_TOKEN)
+                            except Exception as e:
+                                logger.error(f"Error checking carousel for media_id {media_id} via Graph API: {e}")
                         
                         # Forward media to Telegram
                         if carousel_urls and len(carousel_urls) > 1:
